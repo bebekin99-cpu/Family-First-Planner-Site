@@ -262,8 +262,16 @@ textarea.form-input{resize:vertical;min-height:72px;}
 .rating-podium-equal .ap-1,.rating-podium-equal .ap-2,.rating-podium-equal .ap-3,
 .rating-podium-equal .pb-1,.rating-podium-equal .pb-2,.rating-podium-equal .pb-3{width:170px!important;}
 </style>
+<!-- Supabase -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 </head>
 <body>
+<!-- DB Loading overlay -->
+<div id="db-loading" style="position:fixed;inset:0;background:var(--bg,#0d1117);z-index:999999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px">
+  <div style="width:52px;height:52px;border-radius:50%;border:3px solid rgba(108,99,255,.25);border-top-color:#8B5CF6;animation:spin .8s linear infinite"></div>
+  <div id="db-load-msg" style="color:rgba(255,255,255,.6);font-family:'Segoe UI',system-ui,sans-serif;font-size:13px;letter-spacing:1px">Подключение к базе данных…</div>
+  <style>@keyframes spin{to{transform:rotate(360deg)}}</style>
+</div>
 
 <div id="toast-container"></div>
 
@@ -402,10 +410,81 @@ textarea.form-input{resize:vertical;min-height:72px;}
 <div class="modal-overlay" id="modal-overlay"><div class="modal" id="modal-content"></div></div>
 
 <script>
-const S={
-  get:(k,d)=>{try{const v=localStorage.getItem('ffp4_'+k);return v!==null?JSON.parse(v):d;}catch(e){return d;}},
-  set:(k,v)=>{try{localStorage.setItem('ffp4_'+k,JSON.stringify(v));}catch(e){}}
+// ── SUPABASE SETUP ──────────────────────────────────────────
+const _SB_URL = 'https://ycgiruqpjaxytrhkiymh.supabase.co';
+const _SB_KEY = 'sb_publishable__5Wn2BMkXy7AbkAko7Ae_A_TgPAgKg9';
+const _sb = supabase.createClient(_SB_URL, _SB_KEY);
+
+// Local memory cache so synchronous S.get() always works
+const _cache = {};
+
+// All 14 app keys
+const _ALL_KEYS = ['users','teams','top_teams','planners','planner_history',
+  'pending_regs','notifications','planner_reviews','planner_archive',
+  'planner_templates','mindset','notif_sound_data','last_monthly_report','init4'];
+
+// ── Storage API (synchronous interface, async backend) ──────
+const S = {
+  get:(k, d=undefined) => {
+    if(k in _cache) return _cache[k];
+    return d;
+  },
+  set:(k, v) => {
+    _cache[k] = v;
+    // Write to Supabase async (fire-and-forget with retry)
+    _sbWrite(k, v);
+  }
 };
+
+// Write a single key to Supabase
+async function _sbWrite(k, v) {
+  try {
+    await _sb.from('app_data').upsert({key: k, value: v}, {onConflict: 'key'});
+  } catch(e) {
+    console.warn('Supabase write failed for', k, e);
+  }
+}
+
+// Load ALL keys from Supabase into cache on startup
+async function _sbLoadAll() {
+  try {
+    const { data, error } = await _sb.from('app_data').select('key, value');
+    if(error) throw error;
+    if(data) {
+      data.forEach(row => { _cache[row.key] = row.value; });
+    }
+    return true;
+  } catch(e) {
+    console.error('Supabase load failed:', e);
+    return false;
+  }
+}
+
+// Bootstrap: load data, then start app
+async function _bootstrap() {
+  const loadEl = document.getElementById('db-loading');
+  const msgEl = document.getElementById('db-load-msg');
+
+  try {
+    msgEl.textContent = 'Загрузка данных…';
+    const ok = await _sbLoadAll();
+    if(!ok) {
+      msgEl.textContent = '⚠️ Ошибка подключения. Перезагрузите страницу.';
+      return;
+    }
+    msgEl.textContent = 'Готово!';
+    await new Promise(r => setTimeout(r, 300));
+  } catch(e) {
+    msgEl.textContent = '⚠️ Ошибка. Перезагрузите страницу.';
+    return;
+  }
+
+  // Hide loader and start app
+  if(loadEl) loadEl.style.display = 'none';
+  initData();
+  _initApp();
+}
+
 
 // ── NOTIFICATION SOUND & TAB INDICATOR ─────────────────────
 let _notifAudio=null;
@@ -476,9 +555,10 @@ function initData(){
     S.set('pending_regs',[]);S.set('notifications',[]);S.set('mindset',{});S.set('planner_reviews',[]);S.set('init4',true);
   }
 }
-initData();
+// ── App globals ─────────────────────────────────────────────
 let CU=null,cpTasks=[],cpType='individual',apTab='individual',tpTab='individual',ratingTab='users',myPlannerView='individual',viewingId=null,activeWeekIdx=null,drillCtx='';
 
+function _initApp(){
 // OLD FALLING CANVAS REMOVED
 document.addEventListener('mousemove',e=>{
   const x=(e.clientX/window.innerWidth-.5)*18,y=(e.clientY/window.innerHeight-.5)*18;
@@ -486,6 +566,7 @@ document.addEventListener('mousemove',e=>{
   if(l)l.style.transform=`translate(${x*.4}px,${y*.4}px)`;
   if(p)p.style.transform=`translate(${-x*.25}px,${-y*.25}px)`;
 });
+} // end _initApp — rest of app functions are global
 
 // Universal avatar renderer — shows img for base64, emoji/text otherwise
 function _ava(ava,fallback){
@@ -4381,7 +4462,7 @@ function _devCreateTestAdmin(){
 
 // Init dev panel on page load
 document.addEventListener('DOMContentLoaded',()=>{
-  _devPopulateAdmins();
+  _bootstrap();
 });
 // Also refresh after login
 const _origShowApp=showApp;
@@ -4389,6 +4470,25 @@ window.showApp=function(){
   _origShowApp();
   setTimeout(()=>{_devUpdateLabel();_devPopulateAdmins();},800);
 };
+
+// ── Supabase realtime: sync changes from other sessions ─────
+// Subscribe to app_data changes so all open tabs stay in sync
+function _sbSubscribeRealtime(){
+  _sb.channel('app_data_changes')
+    .on('postgres_changes',{event:'*',schema:'public',table:'app_data'},
+      payload=>{
+        if(payload.new && payload.new.key){
+          _cache[payload.new.key]=payload.new.value;
+          // Re-render relevant parts if app is open
+          if(CU){
+            const k=payload.new.key;
+            if(k==='notifications')updateNotifBadge();
+            if(k==='planners'||k==='planner_history'){}// will re-render on next navigation
+          }
+        }
+      })
+    .subscribe();
+}
 </script>
 </body>
 </html>
