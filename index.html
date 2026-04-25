@@ -272,9 +272,7 @@ textarea.form-input{resize:vertical;min-height:72px;}
   <!-- Collapsed panel (shown when open) -->
   <div id="dev-panel-body" style="display:none;flex-direction:column;background:rgba(8,8,22,.97);border:1px solid rgba(108,99,255,.5);border-radius:16px;padding:14px;box-shadow:0 10px 40px rgba(0,0,0,.7);min-width:220px;gap:6px">
     <div style="font-size:9px;font-weight:800;letter-spacing:2px;text-transform:uppercase;color:rgba(108,99,255,.7);margin-bottom:4px;text-align:center">🔧 DEV — Быстрый вход</div>
-    <button onclick="devLogin('owner@ffp.com','owner123')" style="padding:9px 14px;border:1px solid rgba(255,80,160,.5);border-radius:9px;background:rgba(255,80,160,.15);color:#ff69b4;font-family:inherit;font-size:11px;font-weight:700;cursor:pointer;transition:all .2s;letter-spacing:.5px;text-align:left" onmouseenter="this.style.background='rgba(255,80,160,.3)'" onmouseleave="this.style.background='rgba(255,80,160,.15)'">💎 Owner</button>
-    <button onclick="devLogin('admin@ffp.com','admin123')" style="padding:9px 14px;border:1px solid rgba(255,215,0,.5);border-radius:9px;background:rgba(255,215,0,.12);color:#ffd700;font-family:inherit;font-size:11px;font-weight:700;cursor:pointer;transition:all .2s;letter-spacing:.5px;text-align:left" onmouseenter="this.style.background='rgba(255,215,0,.25)'" onmouseleave="this.style.background='rgba(255,215,0,.12)'">⭐ TopAdmin</button>
-    <div id="dev-admin-btns"></div>
+    <div id="dev-all-btns"></div>
     <div style="margin-top:4px;padding-top:8px;border-top:1px solid rgba(108,99,255,.2);text-align:center">
       <span id="dev-current-user" style="font-size:10px;color:rgba(255,255,255,.4)">Не вошли</span>
     </div>
@@ -4314,23 +4312,43 @@ function _devUpdateLabel(){
 }
 
 function _devPopulateAdmins(){
-  const container=document.getElementById('dev-admin-btns');
+  const container=document.getElementById('dev-all-btns');
   if(!container)return;
-  const admins=S.get('users',[]).filter(u=>u.approved&&u.role==='admin');
-  if(!admins.length){
-    container.innerHTML=`<button onclick="_devCreateTestAdmin()"
-      style="padding:8px 14px;border:1px dashed rgba(108,99,255,.4);border-radius:9px;background:rgba(108,99,255,.08);color:rgba(180,175,255,.7);font-family:inherit;font-size:11px;font-weight:700;cursor:pointer;transition:all .2s;letter-spacing:.5px;width:100%;text-align:center"
-      onmouseenter="this.style.background='rgba(108,99,255,.22)';this.style.color='#fff'" onmouseleave="this.style.background='rgba(108,99,255,.08)';this.style.color='rgba(180,175,255,.7)'">
-      + Создать тест-администратора
+  const users=S.get('users',[]).filter(u=>u.approved);
+
+  const roleStyles={
+    owner:{border:'rgba(255,80,160,.5)',bg:'rgba(255,80,160,.15)',bgH:'rgba(255,80,160,.3)',color:'#ff69b4',icon:'💎'},
+    top:  {border:'rgba(255,215,0,.5)', bg:'rgba(255,215,0,.12)', bgH:'rgba(255,215,0,.28)', color:'#ffd700',icon:'⭐'},
+    admin:{border:'rgba(108,99,255,.4)',bg:'rgba(108,99,255,.12)',bgH:'rgba(108,99,255,.28)',color:'rgba(180,175,255,.9)',icon:'🛡️'},
+  };
+
+  const sorted=[
+    ...users.filter(u=>u.role==='owner'),
+    ...users.filter(u=>u.role==='top'),
+    ...users.filter(u=>u.role==='admin'),
+  ];
+
+  if(!sorted.length){container.innerHTML='<div style="font-size:10px;color:rgba(255,255,255,.3);text-align:center;padding:4px 0">Нет пользователей</div>';return;}
+
+  container.innerHTML=sorted.map(u=>{
+    const s=roleStyles[u.role]||roleStyles.admin;
+    const isCurrent=CU&&CU.id===u.id;
+    return`<button onclick="devLogin('${u.email}','${u.password}')"
+      style="padding:9px 14px;border:1px solid ${s.border};border-radius:9px;background:${isCurrent?s.bgH:s.bg};color:${s.color};font-family:inherit;font-size:11px;font-weight:700;cursor:pointer;transition:all .2s;letter-spacing:.5px;text-align:left;width:100%;${isCurrent?'outline:2px solid '+s.border+';':''}display:flex;align-items:center;gap:7px"
+      onmouseenter="this.style.background='${s.bgH}'" onmouseleave="this.style.background='${isCurrent?s.bgH:s.bg}'">
+      <span>${s.icon}</span>
+      <span style="flex:1">${u.username}</span>
+      ${isCurrent?'<span style="font-size:9px;opacity:.7">●</span>':''}
     </button>`;
-    return;
-  }
-  container.innerHTML=admins.map(u=>`
-    <button onclick="devLogin('${u.email}','${u.password}')"
-      style="padding:8px 14px;border:1px solid rgba(108,99,255,.4);border-radius:9px;background:rgba(108,99,255,.12);color:rgba(180,175,255,.9);font-family:inherit;font-size:11px;font-weight:700;cursor:pointer;transition:all .2s;letter-spacing:.5px;width:100%;text-align:left"
-      onmouseenter="this.style.background='rgba(108,99,255,.28)'" onmouseleave="this.style.background='rgba(108,99,255,.12)'">
-      🛡️ ${u.username}
-    </button>`).join('');
+  }).join('')
+  // Add "create test admin" if no admins
+  +(sorted.filter(u=>u.role==='admin').length===0?
+  `<button onclick="_devCreateTestAdmin()"
+    style="padding:9px 14px;border:1px dashed rgba(108,99,255,.4);border-radius:9px;background:rgba(108,99,255,.08);color:rgba(180,175,255,.7);font-family:inherit;font-size:11px;font-weight:700;cursor:pointer;transition:all .2s;letter-spacing:.5px;width:100%;text-align:center"
+    onmouseenter="this.style.background='rgba(108,99,255,.22)';this.style.color='#fff'" onmouseleave="this.style.background='rgba(108,99,255,.08)';this.style.color='rgba(180,175,255,.7)'">
+    + Создать тест-администратора
+  </button>`:''
+  );
 }
 
 function _devCreateTestAdmin(){
