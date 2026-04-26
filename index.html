@@ -665,6 +665,17 @@ async function _bootstrap() {
 // ── App globals ─────────────────────────────────────────────
 let CU=null,cpTasks=[],cpType='individual',apTab='individual',tpTab='individual',ratingTab='users',myPlannerView='individual',viewingId=null,activeWeekIdx=null,drillCtx='';
 
+function initData(){
+  if(!S.get('init4',false)){
+    S.set('users',[
+      {id:'owner1',username:'Owner',email:'owner@ffp.com',password:'owner123',role:'owner',avatar:'',teamId:null,topTeamId:null,approved:true,canCreatePlanner:true},
+      {id:'top1',username:'TopAdmin',email:'admin@ffp.com',password:'admin123',role:'top',avatar:'',teamId:null,topTeamId:null,approved:true,canCreatePlanner:true}
+    ]);
+    S.set('teams',[]);S.set('top_teams',[]);S.set('planners',{});S.set('planner_history',{});
+    S.set('pending_regs',[]);S.set('notifications',[]);S.set('mindset',{});S.set('planner_reviews',[]);S.set('init4',true);
+  }
+}
+
 function _initApp(){
 // OLD FALLING CANVAS REMOVED
 document.addEventListener('mousemove',e=>{
