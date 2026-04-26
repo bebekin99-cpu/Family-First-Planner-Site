@@ -1795,6 +1795,7 @@ function saveProfile(){
   // Update cache
   _cache['users'] = users;
   // Write directly to Supabase — single row upsert for reliability
+  console.log('[saveProfile] Input values — name:', n, '| email:', em, '| pass:', p?'(set)':'(empty)');
   console.log('[saveProfile] Saving user to Supabase:', users[i].id, users[i].username, users[i].email);
   _sb.from('ffp_users').upsert({id: users[i].id, data: users[i]}, {onConflict:'id'})
     .then(({error, data}) => {
