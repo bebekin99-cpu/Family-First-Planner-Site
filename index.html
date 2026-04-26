@@ -827,6 +827,25 @@ function _subscribeRealtime() {
       _refreshActiveLive();
     })
     .subscribe();
+
+  // ── MINDSET (app_data) — live update team mindset view ────
+  _sb.channel('rt_appdata')
+    .on('postgres_changes', {event:'*', schema:'public', table:'app_data'}, p => {
+      if(!p.new) return;
+      _cache[p.new.key] = p.new.value;
+      // If mindset changed and user is on planner page — refresh mindset section
+      if(p.new.key === 'mindset' && (CU?.role==='owner'||CU?.role==='top')) {
+        const pid = document.querySelector('.page.active')?.id;
+        if(pid==='page-my-planner'||pid==='page-top-planners'||pid==='page-admin-planners'||pid==='page-planners') {
+          // Re-render only the mindset area without destroying the planner
+          const mc = document.getElementById('mindset-area');
+          if(mc) {
+            try{ renderPlannerFull && _refreshMindsetTeamSection(); }catch(e){}
+          }
+        }
+      }
+    })
+    .subscribe();
 }
 
 
@@ -1856,9 +1875,86 @@ function renderPlannerFull(container,data,targetId,year,month,isCur,now){
         <div id="mindset-forecast" style="background:rgba(14,14,32,0.93);border:1px solid var(--border);border-radius:14px;padding:18px;min-height:120px"></div>
       </div>`;
       _renderMindsetForecast(mk,today);
+
+      // ── Team mindset overview for Owner and Top Admin ──────
+      if(CU.role==='owner'||CU.role==='top'){
+        const allUsers=S.get('users',[]).filter(u=>u.approved&&u.role!=='owner');
+        // Owner sees: all tops + all admins
+        // Top Admin sees: admins only
+        const targets=CU.role==='owner'
+          ? allUsers
+          : allUsers.filter(u=>u.role==='admin');
+
+        if(targets.length){
+          const lb={energy:'Энергия 🔋',focus:'Фокус 🎯',motivation:'Мотивация 🔥'};
+          const cl={energy:'var(--accent2)',focus:'var(--teal)',motivation:'var(--green)'};
+          const metrics=['energy','focus','motivation'];
+
+          const teamRows=targets.map(u=>{
+            const umk=`${u.id}-${year}-${month}`;
+            const umd=md[umk]||{energy:{},focus:{},motivation:{}};
+            const vals=metrics.map(m=>umd[m][today]||0);
+            const filled=vals.filter(v=>v>0).length;
+            const avg=filled?Math.round(vals.reduce((a,b)=>a+b,0)/filled):0;
+            const col=avg>=8?'var(--green)':avg>=6?'var(--teal)':avg>=4?'#f5c518':avg>0?'var(--accent2)':'var(--muted)';
+            const roleIcon=u.role==='top'?'⭐':u.role==='owner'?'💎':'🛡️';
+            return`<div style="display:flex;align-items:center;gap:10px;padding:8px 12px;background:rgba(14,14,32,.7);border:1px solid var(--border);border-radius:10px">
+              <div style="width:28px;height:28px;border-radius:50%;overflow:hidden;flex-shrink:0;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-size:12px">
+                ${u.avatar?`<img src="${u.avatar}" style="width:100%;height:100%;object-fit:cover">`:'👤'}
+              </div>
+              <div style="flex:1;min-width:0">
+                <div style="font-size:11px;font-weight:700">${roleIcon} ${u.username}</div>
+                ${filled?`<div style="display:flex;gap:6px;margin-top:3px">
+                  ${metrics.map((m,i)=>vals[i]?`<span style="font-size:9px;background:rgba(255,255,255,.06);border-radius:4px;padding:1px 5px;color:${cl[m]}">${['⚡','🎯','🔥'][i]}${vals[i]}</span>`:'').filter(Boolean).join('')}
+                </div>`:`<div style="font-size:9px;color:var(--muted);margin-top:2px">Ещё не заполнено</div>`}
+              </div>
+              ${filled?`<div style="font-size:14px;font-weight:800;color:${col}">${avg}/10</div>`:''}
+            </div>`;
+          }).join('');
+
+          const section=document.createElement('div');
+          section.style.cssText='margin-top:16px;border-top:1px solid rgba(108,99,255,.2);padding-top:14px';
+          section.innerHTML=`
+            <div style="font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:10px">
+              ${CU.role==='owner'?'📊 Состояние команды сегодня':'📊 Состояние администраторов сегодня'}
+            </div>
+            <div style="display:flex;flex-direction:column;gap:6px;max-height:260px;overflow-y:auto">${teamRows}</div>`;
+          mc.appendChild(section);
+        }
+      }
     }
   }
 }
+// Refresh only the team mindset section without re-rendering the whole planner
+function _refreshMindsetTeamSection(){
+  const mc=document.getElementById('mindset-area');
+  if(!mc||!(CU?.role==='owner'||CU?.role==='top')) return;
+  const existing=mc.querySelector('[data-mindset-team]');
+  if(existing) existing.remove();
+  const now=new Date(),today=now.getDate(),year=now.getFullYear(),month=now.getMonth();
+  const md=S.get('mindset',{});
+  const allUsers=S.get('users',[]).filter(u=>u.approved&&u.role!=='owner');
+  const targets=CU.role==='owner' ? allUsers : allUsers.filter(u=>u.role==='admin');
+  if(!targets.length) return;
+  const metrics=['energy','focus','motivation'];
+  const cl={energy:'var(--accent2)',focus:'var(--teal)',motivation:'var(--green)'};
+  const teamRows=targets.map(u=>{
+    const umk=`${u.id}-${year}-${month}`;
+    const umd=md[umk]||{energy:{},focus:{},motivation:{}};
+    const vals=metrics.map(m=>umd[m][today]||0);
+    const filled=vals.filter(v=>v>0).length;
+    const avg=filled?Math.round(vals.reduce((a,b)=>a+b,0)/filled):0;
+    const col=avg>=8?'var(--green)':avg>=6?'var(--teal)':avg>=4?'#f5c518':avg>0?'var(--accent2)':'var(--muted)';
+    const roleIcon=u.role==='top'?'⭐':'🛡️';
+    return`<div style="display:flex;align-items:center;gap:10px;padding:8px 12px;background:rgba(14,14,32,.7);border:1px solid var(--border);border-radius:10px"><div style="width:28px;height:28px;border-radius:50%;overflow:hidden;flex-shrink:0;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-size:12px">${u.avatar?`<img src="${u.avatar}" style="width:100%;height:100%;object-fit:cover">`:'👤'}</div><div style="flex:1;min-width:0"><div style="font-size:11px;font-weight:700">${roleIcon} ${u.username}</div>${filled?`<div style="display:flex;gap:6px;margin-top:3px">${metrics.map((m,i)=>vals[i]?`<span style="font-size:9px;background:rgba(255,255,255,.06);border-radius:4px;padding:1px 5px;color:${cl[m]}">${['⚡','🎯','🔥'][i]}${vals[i]}</span>`:'').filter(Boolean).join('')}</div>`:`<div style="font-size:9px;color:var(--muted);margin-top:2px">Ещё не заполнено</div>`}</div>${filled?`<div style="font-size:14px;font-weight:800;color:${col}">${avg}/10</div>`:''}</div>`;
+  }).join('');
+  const section=document.createElement('div');
+  section.setAttribute('data-mindset-team','1');
+  section.style.cssText='margin-top:16px;border-top:1px solid rgba(108,99,255,.2);padding-top:14px';
+  section.innerHTML=`<div style="font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:10px">${CU.role==='owner'?'📊 Состояние команды сегодня':'📊 Состояние администраторов сегодня'}</div><div style="display:flex;flex-direction:column;gap:6px;max-height:260px;overflow-y:auto">${teamRows}</div>`;
+  mc.appendChild(section);
+}
+
 function _renderMindsetForecast(mk,today){
   const fc=document.getElementById('mindset-forecast');if(!fc)return;
   const md=S.get('mindset',{});const myd=md[mk]||{energy:{},focus:{},motivation:{}};
@@ -1933,7 +2029,7 @@ function reRenderDrill(){
 }
 
 // PLANNERS LIST HELPER
-function buildPlannersList(containerId,users,teams,getPlan,dim,year,month,ctx,listType){
+function buildPlannersList(containerId,users,teams,getPlan,dim,year,month,ctx,listType,isCur){
   const container=document.getElementById(containerId);if(!container)return;
   const backFn=ctx==='top'?'renderTopPlannersContent()':ctx==='all'?'renderAllPlannersContent()':'renderAdminPlannersContent()';
   if(viewingId){
@@ -1962,15 +2058,20 @@ function buildPlannersList(containerId,users,teams,getPlan,dim,year,month,ctx,li
       const members=allUsers.filter(u=>u.teamId===t.id||u.topTeamId===t.id);
       const hasPlan=!!(getPlan('team_'+t.id)?.tasks?.length);
       return`<div class="clickable-row" style="flex-direction:column;align-items:stretch;gap:10px;cursor:default">
-        <div style="display:flex;align-items:center;gap:12px;cursor:pointer" onclick="viewingId='t_${t.id}';activeWeekIdx=null;drillCtx='${ctx}';${backFn}">
-          <div class="team-ava" style="width:42px;height:42px;border-radius:11px;font-size:17px;flex-shrink:0">${_ava(t.avatar,'👥')}</div>
-          <div style="flex:1;min-width:0">
-            <div style="font-size:14px;font-weight:700">${t.name||'—'} ${hasPlan?'<span title="Планнер назначен">✅</span>':''}</div>
-            <div style="font-size:10px;color:var(--muted);margin-top:1px">${members.length} участник${members.length===1?'':members.length<5?'а':'ов'}</div>
+        <div style="display:flex;align-items:center;gap:12px">
+          <div style="flex:1;display:flex;align-items:center;gap:12px;cursor:pointer" onclick="viewingId='t_${t.id}';activeWeekIdx=null;drillCtx='${ctx}';${backFn}">
+            <div class="team-ava" style="width:42px;height:42px;border-radius:11px;font-size:17px;flex-shrink:0">${_ava(t.avatar,'👥')}</div>
+            <div style="flex:1;min-width:0">
+              <div style="font-size:14px;font-weight:700">${t.name||'—'} ${hasPlan?'<span title="Планнер назначен">✅</span>':''}</div>
+              <div style="font-size:10px;color:var(--muted);margin-top:1px">${members.length} участник${members.length===1?'':members.length<5?'а':'ов'}</div>
+            </div>
+            ${ring(pct,44,'var(--teal)')}
+            <div style="font-size:14px;font-weight:800;color:var(--teal);width:46px;text-align:right">${pct}%</div>
           </div>
-          ${ring(pct,44,'var(--teal)')}
-          <div style="font-size:14px;font-weight:800;color:var(--teal);width:46px;text-align:right">${pct}%</div>
-          <div style="color:var(--muted);font-size:18px">›</div>
+          ${CU.role==='owner'&&hasPlan&&isCur?`<div style="display:flex;gap:4px;flex-shrink:0">
+            <button class="btn btn-ghost btn-sm" style="border-color:var(--teal);color:var(--teal);padding:5px 8px" title="Архивировать" onclick="ownerArchivePlanner('team_${t.id}','${t.name}')">📦</button>
+            <button class="btn btn-danger btn-sm" style="padding:5px 8px" title="Удалить" onclick="ownerDeletePlanner('team_${t.id}','${t.name}')">🗑</button>
+          </div>`:'<div style="color:var(--muted);font-size:18px;cursor:pointer" onclick="viewingId=\'t_${t.id}\';activeWeekIdx=null;drillCtx=\'${ctx}\';${backFn}">›</div>'}
         </div>
         ${members.length?`<div style="display:flex;flex-wrap:wrap;gap:5px;padding:0 2px">
           ${members.map(m=>`<div style="display:flex;align-items:center;gap:5px;background:rgba(14,14,32,0.93);border:1px solid var(--border);border-radius:20px;padding:3px 9px 3px 4px">
@@ -1983,7 +2084,7 @@ function buildPlannersList(containerId,users,teams,getPlan,dim,year,month,ctx,li
     }).join('')}</div>`;
   } else {
     if(!users.length){container.innerHTML='<div class="card" style="text-align:center;padding:50px;color:var(--muted)">Нет пользователей</div>';return;}
-    container.innerHTML=`<div class="clickable-list">${users.map(u=>{const{total,done}=getPlannerStats(getPlan(u.id),dim,year,month);const pct=total?Math.round(done/total*100):0;return`<div class="clickable-row" onclick="viewingId='u_${u.id}';activeWeekIdx=null;drillCtx='${ctx}';${backFn}"><div class="rank-ava">${u.avatar?`<img src="${u.avatar}">`:'👤'}</div><div style="flex:1"><div style="font-size:13px;font-weight:700">${u.username}</div><div style="font-size:10px;color:var(--muted)">${u.email}</div></div>${ring(pct,42,'var(--accent)')}<div style="font-size:13px;font-weight:800;color:var(--accent);width:44px;text-align:right">${pct}%</div><div style="color:var(--muted);font-size:18px">›</div></div>`;}).join('')}</div>`;
+    container.innerHTML=`<div class="clickable-list">${users.map(u=>{const{total,done}=getPlannerStats(getPlan(u.id),dim,year,month);const pct=total?Math.round(done/total*100):0;const hasPlan=!!(getPlan(u.id)?.tasks?.length);const isOwnerView=CU.role==='owner'&&hasPlan&&isCur;return`<div class="clickable-row" style="gap:8px"><div class="rank-ava" style="cursor:pointer" onclick="viewingId='u_${u.id}';activeWeekIdx=null;drillCtx='${ctx}';${backFn}">${u.avatar?`<img src="${u.avatar}">`:'👤'}</div><div style="flex:1;cursor:pointer" onclick="viewingId='u_${u.id}';activeWeekIdx=null;drillCtx='${ctx}';${backFn}"><div style="font-size:13px;font-weight:700">${u.username}</div><div style="font-size:10px;color:var(--muted)">${u.email}</div></div>${ring(pct,42,'var(--accent)')}<div style="font-size:13px;font-weight:800;color:var(--accent);width:44px;text-align:right;cursor:pointer" onclick="viewingId='u_${u.id}';activeWeekIdx=null;drillCtx='${ctx}';${backFn}">${pct}%</div>${isOwnerView?`<div style="display:flex;gap:4px;flex-shrink:0"><button class="btn btn-ghost btn-sm" style="border-color:var(--teal);color:var(--teal);padding:5px 8px" title="Архивировать" onclick="event.stopPropagation();ownerArchivePlanner('${u.id}','${u.username}')">📦</button><button class="btn btn-danger btn-sm" style="padding:5px 8px" title="Удалить" onclick="event.stopPropagation();ownerDeletePlanner('${u.id}','${u.username}')">🗑</button></div>`:'<div style="color:var(--muted);font-size:18px;cursor:pointer" onclick="viewingId=\'u_${u.id}\';activeWeekIdx=null;drillCtx=\'${ctx}\';${backFn}">›</div>'}</div>`;}).join('')}</div>`;
   }
 }
 
@@ -2017,11 +2118,11 @@ function renderAllPlannersContent(){
   if(_apRole==='top'){
     const topUsers=S.get('users',[]).filter(u=>u.approved&&u.role==='top');
     const topTeams=S.get('top_teams',[]);
-    buildPlannersList('all-planners-content',topUsers,topTeams,getPlan,dim,year,month,'all',_apSub==='individual'?'users':'teams');
+    buildPlannersList('all-planners-content',topUsers,topTeams,getPlan,dim,year,month,'all',_apSub==='individual'?'users':'teams',isCur);
   } else {
     const adminUsers=S.get('users',[]).filter(u=>u.approved&&u.role==='admin');
     const teams=S.get('teams',[]);
-    buildPlannersList('all-planners-content',adminUsers,teams,getPlan,dim,year,month,'all',_apSub==='individual'?'users':'teams');
+    buildPlannersList('all-planners-content',adminUsers,teams,getPlan,dim,year,month,'all',_apSub==='individual'?'users':'teams',isCur);
   }
 }
 
@@ -2037,7 +2138,7 @@ function renderTopPlannersContent(){
   const dim=new Date(year,month+1,0).getDate();
   const topUsers=S.get('users',[]).filter(u=>u.approved&&u.role==='top');
   const topTeams=S.get('top_teams',[]);
-  buildPlannersList('top-planners-content',topUsers,topTeams,getPlan,dim,year,month,'top',tpTab==='individual'?'users':'teams');
+  buildPlannersList('top-planners-content',topUsers,topTeams,getPlan,dim,year,month,'top',tpTab==='individual'?'users':'teams',isCur);
 }
 
 // ADMIN PLANNERS (owner + top)
@@ -2052,7 +2153,7 @@ function renderAdminPlannersContent(){
   const dim=new Date(year,month+1,0).getDate();
   const adminUsers=S.get('users',[]).filter(u=>u.approved&&u.role==='admin');
   const teams=S.get('teams',[]);
-  buildPlannersList('admin-planners-content',adminUsers,teams,getPlan,dim,year,month,'admin',apTab==='individual'?'users':'teams');
+  buildPlannersList('admin-planners-content',adminUsers,teams,getPlan,dim,year,month,'admin',apTab==='individual'?'users':'teams',isCur);
 }
 
 // RATING
@@ -3580,7 +3681,7 @@ function _renderArchiveList(items,fullArc,canRestore){
           </div>
           <button class="btn btn-ghost btn-sm" onclick="previewArchivePlanner(${realIdx})">👁</button>
           ${canRestore?`<button class="btn btn-success btn-sm" onclick="confirmRestoreArchive(${realIdx})">↩ Восстановить</button>`:''}
-          ${CU.role==='owner'?`<button class="btn btn-danger btn-sm" onclick="deleteFromArchiveAndRefresh(${realIdx})">🗑</button>`:''}
+          <button class="btn btn-danger btn-sm" onclick="deleteFromArchiveAndRefresh(${realIdx})" title="Удалить из архива">🗑</button>
         </div>
       </div>`;
     }).join('')}
@@ -3699,6 +3800,7 @@ function previewArchivePlanner(idx){
     <div class="modal-actions">
       <button class="btn btn-ghost" onclick="closeModal()">Закрыть</button>
       <button class="btn btn-success" onclick="closeModal();confirmRestoreArchive(${idx})">↩ Восстановить</button>
+      <button class="btn btn-danger" onclick="closeModal();deleteFromArchiveAndRefresh(${idx})">🗑 Удалить</button>
     </div>`);
   const mc=document.getElementById('modal-content');if(mc)mc.style.width='500px';
 }
@@ -3757,6 +3859,7 @@ function openPlannerPreviewCard(plannerKey,ownerName){
   const{total,done}=getPlannerStats(data,dim,y,m);const pct=total?Math.round(done/total*100):0;
   const bc=pct>=70?'var(--green)':pct>=40?'var(--accent)':'var(--accent2)';
   const c=2*Math.PI*28,off=c-(pct/100)*c;
+  const isOwner=CU.role==='owner';
   showModal(`<div class="modal-title">📋 ${data.name}</div>
     <div style="font-size:11px;color:var(--muted);margin-bottom:16px">👤 ${ownerName}</div>
     <div style="display:flex;align-items:center;gap:16px;background:rgba(108,99,255,.08);border:1px solid rgba(108,99,255,.2);border-radius:12px;padding:14px;margin-bottom:18px">
@@ -3784,8 +3887,62 @@ function openPlannerPreviewCard(plannerKey,ownerName){
         </div>`;
       }).join('')}
     </div>
-    <div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">Закрыть</button></div>`);
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal()">Закрыть</button>
+      ${isOwner?`
+      <button class="btn btn-ghost" style="border-color:var(--teal);color:var(--teal)" onclick="closeModal();ownerArchivePlanner('${plannerKey}','${ownerName}')">📦 Архивировать</button>
+      <button class="btn btn-danger" onclick="closeModal();ownerDeletePlanner('${plannerKey}','${ownerName}')">🗑 Удалить</button>
+      `:''}
+    </div>`);
   const mc=document.getElementById('modal-content');if(mc)mc.style.width='480px';
+}
+
+// Owner: archive a planner from the preview card
+function ownerArchivePlanner(plannerKey, ownerName){
+  confirmDialog('📦','Архивировать планнер',
+    `Планнер для "${ownerName}" будет перемещён в архив. Текущий прогресс сохранится.`,
+    ()=>{
+      const pl=S.get('planners',{});
+      if(!pl[plannerKey]){toast('Планнер не найден','error');return;}
+      // Archive it
+      const arc=S.get('planner_archive',[]);
+      const allU=S.get('users',[]);
+      const allT=[...S.get('teams',[]),...S.get('top_teams',[])];
+      const isTeam=plannerKey.startsWith('team_');
+      const label=ownerName||(isTeam?(allT.find(t=>'team_'+t.id===plannerKey)?.name||plannerKey):(allU.find(u=>u.id===plannerKey)?.username||plannerKey));
+      const archItem={
+        id:'arch'+Date.now()+Math.random().toString(36).slice(2),
+        plannerKey,ownerLabel:label,
+        data:JSON.parse(JSON.stringify(pl[plannerKey])),
+        archivedAt:Date.now(),archivedBy:CU.username,
+        month:new Date().toLocaleString('ru',{month:'long',year:'numeric'})
+      };
+      arc.unshift(archItem);
+      S.set('planner_archive',arc);
+      delete pl[plannerKey];
+      S.set('planners',pl);
+      _sb.from('ffp_planners').delete().eq('id',plannerKey);
+      _sb.from('task_completions').delete().eq('planner',plannerKey);
+      toast('Планнер архивирован ✓','success');
+      _refreshActiveLive();
+    }
+  );
+}
+
+// Owner: permanently delete a planner from the preview card
+function ownerDeletePlanner(plannerKey, ownerName){
+  confirmDialog('🗑️','Удалить планнер',
+    `Планнер для "${ownerName}" будет удалён безвозвратно. Весь прогресс будет потерян.`,
+    ()=>{
+      const pl=S.get('planners',{});
+      delete pl[plannerKey];
+      S.set('planners',pl);
+      _sb.from('ffp_planners').delete().eq('id',plannerKey);
+      _sb.from('task_completions').delete().eq('planner',plannerKey);
+      toast('Планнер удалён','success');
+      _refreshActiveLive();
+    }
+  );
 }
 
 function openFuturePlannerCard(histKey,plannerKey,ownerName){
