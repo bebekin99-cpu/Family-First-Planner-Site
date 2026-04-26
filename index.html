@@ -583,19 +583,62 @@ function _refreshActiveLive() {
   try {
     const pid = document.querySelector('.page.active')?.id;
     if(!pid) return;
-    if(pid==='page-my-planner')       { try{renderMyPlannerContent();}catch(e){} }
-    else if(pid==='page-planners')    { try{renderAllPlanners();}catch(e){} }
-    else if(pid==='page-top-planners'){ try{renderTopPlanners();}catch(e){} }
-    else if(pid==='page-admin-planners'){ try{renderAdminPlanners();}catch(e){} }
-    else if(pid==='page-rating')      { try{renderRatingContent();}catch(e){} }
-    else if(pid==='page-all-teams')   { try{renderAllTeams();}catch(e){} }
-    else if(pid==='page-teams')       { try{renderTeams();}catch(e){} }
-    else if(pid==='page-top-teams')   { try{renderTopTeams();}catch(e){} }
-    else if(pid==='page-my-team')     { try{renderMyTeam();}catch(e){} }
-    else if(pid==='page-admins')      { try{renderAdmins();}catch(e){} }
-    else if(pid==='page-profile')     { try{renderProfile();}catch(e){} }
-    else if(pid==='page-archive-page'){ try{renderArchivePage();}catch(e){} }
-    else if(pid==='page-create-planner'){ try{renderExistingPlanners();renderMyReviews();}catch(e){} }
+
+    // ── PLANNER PAGES — never destroy open planner ───────────
+    // _fastUpdatePlanner handles in-place updates for all visible planners
+    if(pid==='page-my-planner' || pid==='page-top-planners' || pid==='page-admin-planners') {
+      return; // handled by rt_planners → _fastUpdatePlanner directly
+    }
+
+    // ── CREATE PLANNER — never re-render while user is filling form ──
+    if(pid==='page-create-planner') {
+      // Only refresh the archive/existing list at the bottom, not the form
+      try{ renderExistingPlanners(); }catch(e){}
+      try{ renderMyReviews(); }catch(e){}
+      return;
+    }
+
+    // ── PROFILE — don't clear form if user is actively editing ──
+    if(pid==='page-profile') {
+      const activeInput = document.activeElement;
+      const isEditingProfile = activeInput &&
+        (activeInput.closest('#profile-content') || activeInput.closest('.modal'));
+      if(!isEditingProfile) { try{ renderProfile(); }catch(e){} }
+      return;
+    }
+
+    // ── PLANNERS LIST — only full re-render if NOT viewing a detail ──
+    if(pid==='page-planners') {
+      if(!viewingId) { try{ renderAllPlanners(); }catch(e){} }
+      else {
+        // User is viewing a specific planner — just fast-patch it
+        const pl = _cache['planners'] || {};
+        if(pl[viewingId]) { try{ _fastUpdatePlanner(viewingId, pl[viewingId]); }catch(e){} }
+      }
+      return;
+    }
+
+    // ── TEAMS — preserve active tab ──────────────────────────
+    if(pid==='page-all-teams')    { try{ renderAllTeams(); }catch(e){} return; }
+    if(pid==='page-teams')        { try{ renderTeams(); }catch(e){} return; }
+    if(pid==='page-top-teams')    { try{ renderTopTeams(); }catch(e){} return; }
+    if(pid==='page-my-team')      { try{ renderMyTeam(); }catch(e){} return; }
+
+    // ── USERS/ADMINS — preserve active tab ───────────────────
+    if(pid==='page-admins') {
+      // Don't re-render if a modal is open (owner might be mid-action)
+      if(!document.getElementById('modal-overlay')?.classList.contains('show')) {
+        try{ renderAdmins(); }catch(e){}
+      }
+      return;
+    }
+
+    // ── RATING — safe to re-render ────────────────────────────
+    if(pid==='page-rating') { try{ renderRatingContent(); }catch(e){} return; }
+
+    // ── ARCHIVE ───────────────────────────────────────────────
+    if(pid==='page-archive-page') { try{ renderArchivePage(); }catch(e){} return; }
+
   } catch(e) {}
 }
 
@@ -638,10 +681,29 @@ function _subscribeRealtime() {
   _sb.channel('rt_planners')
     .on('postgres_changes', {event:'*', schema:'public', table:'ffp_planners'}, p => {
       const pl = _cache['planners'] || {};
+      const changedKey = p.new?.id || p.old?.id;
       if(p.eventType === 'DELETE') delete pl[p.old?.id];
       else if(p.new?.data) pl[p.new.id] = p.new.data;
       _cache['planners'] = pl;
-      _refreshActiveLive();
+
+      if(!CU || !changedKey) return;
+      const pid = document.querySelector('.page.active')?.id;
+
+      const plannerPages = ['page-my-planner','page-planners','page-top-planners','page-admin-planners'];
+      if(plannerPages.includes(pid)) {
+        // Fast-patch the changed planner without destroying the page
+        if(pl[changedKey]) {
+          try { _fastUpdatePlanner(changedKey, pl[changedKey]); } catch(e) {}
+        }
+        // If on list page and NOT viewing a detail — also refresh the list cards
+        if(pid === 'page-planners' && !viewingId) {
+          try { renderAllPlanners(); } catch(e) {}
+        }
+      }
+      // Other pages that show planner stats (rating, profile) — safe full refresh
+      else {
+        _refreshActiveLive();
+      }
     })
     .subscribe();
 
