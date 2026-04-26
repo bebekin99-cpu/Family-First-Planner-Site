@@ -725,81 +725,52 @@ function _subscribeRealtime() {
   // ── PLANNERS — live create/update/delete ──────────────────
   _sb.channel('rt_planners')
     .on('postgres_changes', {event:'*', schema:'public', table:'ffp_planners'}, p => {
-      const pl = _cache['planners'] || {};
-      const changedKey = p.new?.id || p.old?.id;
       const isDelete = p.eventType === 'DELETE';
+      const changedKey = p.new?.id || p.old?.id;
 
-      if(isDelete) {
-        if(changedKey) {
-          delete pl[changedKey];
-        } else {
-          // Replica identity not set — p.old has no id
-          // Reload planners from DB to get accurate state
-          _sb.from('ffp_planners').select('id, data').then(({data}) => {
-            if(!data) return;
-            const fresh = {};
-            data.forEach(row => { if(row.id && row.data) fresh[row.id] = row.data; });
-            _cache['planners'] = fresh;
-            // Re-render after fresh load
-            const pid2 = document.querySelector('.page.active')?.id;
-            if(pid2==='page-my-planner') { try{renderMyPlanner();}catch(e){} }
-            else if(pid2==='page-planners') { try{renderAllPlannersContent();}catch(e){} }
-            else if(pid2==='page-top-planners') { try{renderTopPlannersContent();}catch(e){} }
-            else if(pid2==='page-admin-planners') { try{renderAdminPlannersContent();}catch(e){} }
-            else if(pid2==='page-create-planner') { try{renderExistingPlanners();}catch(e){} }
-          });
-          return; // handled above
-        }
-      } else if(p.new?.data) {
+      if(!isDelete && p.new?.data) {
+        // INSERT or UPDATE — apply immediately
+        const pl = _cache['planners'] || {};
         pl[p.new.id] = p.new.data;
-      }
-      _cache['planners'] = pl;
-      if(!CU) return;
-      const pid = document.querySelector('.page.active')?.id;
-
-      if(isDelete) {
-        // Planner deleted — re-render any page showing it.
-        // NOTE: even if changedKey is undefined (replica identity not set),
-        // we still re-render all planner pages to be safe.
-
-        // Reset viewingId if user was viewing the deleted planner
-        if(viewingId && changedKey) {
-          const viewedKey = viewingId.startsWith('u_') ? viewingId.slice(2) : 'team_'+viewingId.slice(2);
-          if(viewedKey === changedKey) { viewingId=null; activeWeekIdx=null; }
-        }
-
-        // Re-render ALL planner pages unconditionally on any delete
-        // so that TopAdmin/Admin always sees the removal even without replica identity
-        if(pid==='page-my-planner') {
-          try{ renderMyPlanner(); }catch(e){}
-        } else if(pid==='page-planners') {
-          try{ renderAllPlannersContent(); }catch(e){}
-        } else if(pid==='page-top-planners') {
-          try{ renderTopPlannersContent(); }catch(e){}
-        } else if(pid==='page-admin-planners') {
-          try{ renderAdminPlannersContent(); }catch(e){}
-        } else if(pid==='page-create-planner') {
-          try{ renderExistingPlanners(); }catch(e){}
-        } else {
-          _refreshActiveLive();
-        }
-
-        // If THIS user's own planner was deleted and they are NOT on the planner page,
-        // mark it so next time they open it, it shows "no planner"
-        if(changedKey && (changedKey===CU.id || changedKey==='team_'+CU.teamId || changedKey==='team_'+CU.topTeamId)) {
-          // Cache is already updated above — nothing else needed
-          // Next renderMyPlanner() call will show empty state automatically
-        }
-      } else {
-        // Planner created or updated
+        _cache['planners'] = pl;
+        if(!CU) return;
+        const pid = document.querySelector('.page.active')?.id;
         const plannerPages=['page-my-planner','page-planners','page-top-planners','page-admin-planners'];
         if(plannerPages.includes(pid)) {
-          if(pl[changedKey]) { try{ _fastUpdatePlanner(changedKey, pl[changedKey]); }catch(e){} }
+          if(pl[p.new.id]) { try{ _fastUpdatePlanner(p.new.id, pl[p.new.id]); }catch(e){} }
+          if(pid==='page-my-planner' && p.new.id===CU.id) { try{ renderMyPlanner(); }catch(e){} }
           if(pid==='page-planners'&&!viewingId) { try{ renderAllPlannersContent(); }catch(e){} }
-          if(changedKey===CU.id&&pid==='page-my-planner') { try{ renderMyPlanner(); }catch(e){} }
         } else if(pid==='page-create-planner') {
           try{ renderExistingPlanners(); }catch(e){}
-        } else { _refreshActiveLive(); }
+        }
+        return;
+      }
+
+      if(isDelete) {
+        // Always reload planners from DB on any DELETE
+        // This handles both cases: with and without REPLICA IDENTITY FULL
+        _sb.from('ffp_planners').select('id, data').then(({data, error}) => {
+          if(error) return;
+          const fresh = {};
+          (data||[]).forEach(row => { if(row.id && row.data) fresh[row.id] = row.data; });
+          _cache['planners'] = fresh;
+          if(!CU) return;
+
+          // Reset viewingId if user was viewing a now-deleted planner
+          if(viewingId) {
+            const vk = viewingId.startsWith('u_') ? viewingId.slice(2) : 'team_'+viewingId.slice(2);
+            if(!fresh[vk]) { viewingId=null; activeWeekIdx=null; }
+          }
+
+          // Re-render current page with fresh data
+          const pid = document.querySelector('.page.active')?.id;
+          if(pid==='page-my-planner')          { try{ renderMyPlanner(); }catch(e){} }
+          else if(pid==='page-planners')        { try{ renderAllPlannersContent(); }catch(e){} }
+          else if(pid==='page-top-planners')    { try{ renderTopPlannersContent(); }catch(e){} }
+          else if(pid==='page-admin-planners')  { try{ renderAdminPlannersContent(); }catch(e){} }
+          else if(pid==='page-create-planner')  { try{ renderExistingPlanners(); }catch(e){} }
+          else                                   { _refreshActiveLive(); }
+        });
       }
     })
     .subscribe();
