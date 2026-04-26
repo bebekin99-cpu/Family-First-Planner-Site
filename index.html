@@ -682,27 +682,42 @@ function _subscribeRealtime() {
     .on('postgres_changes', {event:'*', schema:'public', table:'ffp_planners'}, p => {
       const pl = _cache['planners'] || {};
       const changedKey = p.new?.id || p.old?.id;
-      if(p.eventType === 'DELETE') delete pl[p.old?.id];
+      const isDelete = p.eventType === 'DELETE';
+      if(isDelete) delete pl[p.old?.id];
       else if(p.new?.data) pl[p.new.id] = p.new.data;
       _cache['planners'] = pl;
-
       if(!CU || !changedKey) return;
       const pid = document.querySelector('.page.active')?.id;
 
-      const plannerPages = ['page-my-planner','page-planners','page-top-planners','page-admin-planners'];
-      if(plannerPages.includes(pid)) {
-        // Fast-patch the changed planner without destroying the page
-        if(pl[changedKey]) {
-          try { _fastUpdatePlanner(changedKey, pl[changedKey]); } catch(e) {}
+      if(isDelete) {
+        // Planner deleted — re-render any page showing it
+        // If user was viewing the deleted planner, reset viewingId
+        if(viewingId) {
+          const viewedKey = viewingId.startsWith('u_') ? viewingId.slice(2) : 'team_'+viewingId.slice(2);
+          if(viewedKey === changedKey) { viewingId=null; activeWeekIdx=null; }
         }
-        // If on list page and NOT viewing a detail — also refresh the list cards
-        if(pid === 'page-planners' && !viewingId) {
-          try { renderAllPlanners(); } catch(e) {}
+        // Re-render the active page
+        if(pid==='page-my-planner') { try{ renderMyPlanner(); }catch(e){} }
+        else if(pid==='page-planners') { try{ renderAllPlannersContent(); }catch(e){} }
+        else if(pid==='page-top-planners') { try{ renderTopPlannersContent(); }catch(e){} }
+        else if(pid==='page-admin-planners') { try{ renderAdminPlannersContent(); }catch(e){} }
+        else if(pid==='page-create-planner') { try{ renderExistingPlanners(); }catch(e){} }
+        else { _refreshActiveLive(); }
+        // Also refresh my-planner if it was THIS user's planner that got deleted
+        if((changedKey===CU.id || changedKey==='team_'+CU.teamId || changedKey==='team_'+CU.topTeamId) && pid!=='page-my-planner') {
+          // Their planner was removed by owner — force re-render when they visit
+          // No action needed here, renderMyPlanner will show "no planner" state
         }
-      }
-      // Other pages that show planner stats (rating, profile) — safe full refresh
-      else {
-        _refreshActiveLive();
+      } else {
+        // Planner created or updated
+        const plannerPages=['page-my-planner','page-planners','page-top-planners','page-admin-planners'];
+        if(plannerPages.includes(pid)) {
+          if(pl[changedKey]) { try{ _fastUpdatePlanner(changedKey, pl[changedKey]); }catch(e){} }
+          if(pid==='page-planners'&&!viewingId) { try{ renderAllPlannersContent(); }catch(e){} }
+          if(changedKey===CU.id&&pid==='page-my-planner') { try{ renderMyPlanner(); }catch(e){} }
+        } else if(pid==='page-create-planner') {
+          try{ renderExistingPlanners(); }catch(e){}
+        } else { _refreshActiveLive(); }
       }
     })
     .subscribe();
@@ -930,14 +945,26 @@ async function _bootstrap() {
 let CU=null,cpTasks=[],cpType='individual',apTab='individual',tpTab='individual',ratingTab='users',myPlannerView='individual',viewingId=null,activeWeekIdx=null,drillCtx='';
 
 function initData(){
-  if(!S.get('init4',false)){
+  // Only create DEFAULT users if NO users exist at all in the database.
+  // Never overwrite existing data — this prevents wiping real changes on code updates.
+  const existingUsers = S.get('users', []);
+  if(!existingUsers.length){
     S.set('users',[
       {id:'owner1',username:'Owner',email:'owner@ffp.com',password:'owner123',role:'owner',avatar:'',teamId:null,topTeamId:null,approved:true,canCreatePlanner:true},
       {id:'top1',username:'TopAdmin',email:'admin@ffp.com',password:'admin123',role:'top',avatar:'',teamId:null,topTeamId:null,approved:true,canCreatePlanner:true}
     ]);
-    S.set('teams',[]);S.set('top_teams',[]);S.set('planners',{});S.set('planner_history',{});
-    S.set('pending_regs',[]);S.set('notifications',[]);S.set('mindset',{});S.set('planner_reviews',[]);S.set('init4',true);
   }
+  // Only init empty collections if completely missing (not just empty)
+  if(!('teams' in _cache))           S.set('teams',[]);
+  if(!('top_teams' in _cache))       S.set('top_teams',[]);
+  if(!('planners' in _cache))        S.set('planners',{});
+  if(!('planner_history' in _cache)) S.set('planner_history',{});
+  if(!('pending_regs' in _cache))    S.set('pending_regs',[]);
+  if(!('notifications' in _cache))   S.set('notifications',[]);
+  if(!('mindset' in _cache))         S.set('mindset',{});
+  if(!('planner_reviews' in _cache)) S.set('planner_reviews',[]);
+  // Mark as initialised in DB
+  if(!S.get('init4', false)) S.set('init4', true);
 }
 
 function _initApp(){
@@ -3608,9 +3635,8 @@ function renderArchivePage(){
   const arc=S.get('planner_archive',[]);
   const users=S.get('users',[]);
   const teams=S.get('teams',[]);const topTeams=S.get('top_teams',[]);
-  const allTeams=[...teams,...topTeams];
 
-  // Build tab definitions per role
+  // Build tabs per role
   let tabs=[];
   if(CU.role==='owner'){
     const topUserIds=users.filter(u=>u.role==='top').map(u=>u.id);
@@ -3618,44 +3644,44 @@ function renderArchivePage(){
     const adminUserIds=users.filter(u=>u.role==='admin').map(u=>u.id);
     const adminTeamIds=teams.map(t=>'team_'+t.id);
     tabs=[
-      {id:'top',label:'⭐ Топ администраторы',keys:[...topUserIds,...topTeamIds]},
-      {id:'admin',label:'🛡️ Администраторы',keys:[...adminUserIds,...adminTeamIds]},
+      {id:'top',      label:'⭐ Топ администраторы',         keys:topUserIds,   canRestore:true, canDelete:true},
+      {id:'top_teams',label:'⭐ Команды Топ администраторов', keys:topTeamIds,   canRestore:true, canDelete:true},
+      {id:'admin',    label:'🛡️ Администраторы',              keys:adminUserIds, canRestore:true, canDelete:true},
+      {id:'admin_teams',label:'🛡️ Команды администраторов',   keys:adminTeamIds, canRestore:true, canDelete:true},
     ];
   } else if(CU.role==='top'){
+    // Top sees own planners (view only for self) + admins (restore+delete) + admin teams (restore+delete)
     const at=myActiveTeam();
     const myKeys=[CU.id,...(at?[at.key]:[])];
     const adminUserIds=users.filter(u=>u.role==='admin').map(u=>u.id);
     const adminTeamIds=teams.map(t=>'team_'+t.id);
     tabs=[
-      {id:'mine',label:'👤 Мои планнеры',keys:myKeys},
-      {id:'admin',label:'🛡️ Администраторы',keys:[...adminUserIds,...adminTeamIds]},
+      {id:'mine',       label:'👤 Мои планнеры',              keys:myKeys,       canRestore:false, canDelete:false},
+      {id:'admin',      label:'🛡️ Администраторы',            keys:adminUserIds, canRestore:true,  canDelete:true},
+      {id:'admin_teams',label:'🛡️ Команды администраторов',   keys:adminTeamIds, canRestore:true,  canDelete:true},
     ];
   } else {
-    // Admin — own + own team
+    // Admin — own planners only, view only (no restore, no delete)
     const at=myActiveTeam();
     const myKeys=[CU.id,...(at?[at.key]:[])];
-    tabs=[{id:'mine',label:'📋 Мои планнеры',keys:myKeys}];
+    tabs=[{id:'mine',label:'📋 Мои планнеры',keys:myKeys,canRestore:false,canDelete:false}];
   }
 
-  // Current active tab
   if(!window._archiveTab||!tabs.find(t=>t.id===window._archiveTab))window._archiveTab=tabs[0]?.id;
   const activeTab=tabs.find(t=>t.id===window._archiveTab)||tabs[0];
   const filtered=arc.filter(a=>activeTab?.keys?.includes(a.plannerKey));
 
-  const canRestore=CU.role==='owner'||CU.role==='top';
-
   container.innerHTML=`
-    ${tabs.length>1?`<div class="tab-bar" style="margin-bottom:18px">
+    ${tabs.length>1?`<div class="tab-bar" style="margin-bottom:18px;flex-wrap:wrap">
       ${tabs.map(t=>`<div class="tab-btn ${window._archiveTab===t.id?'active':''}" onclick="window._archiveTab='${t.id}';renderArchivePage()">${t.label}</div>`).join('')}
     </div>`:''}
-    ${_renderArchiveList(filtered,arc,canRestore)}`;
+    ${_renderArchiveList(filtered,arc,activeTab?.canRestore||false,activeTab?.canDelete||false)}`;
 }
 
-function _renderArchiveList(items,fullArc,canRestore){
+function _renderArchiveList(items,fullArc,canRestore,canDelete){
   if(!items.length)return`<div class="card" style="text-align:center;padding:50px;color:var(--muted)"><div style="font-size:36px;margin-bottom:12px">🗄️</div><div>Архивных планнеров нет</div></div>`;
   const users=S.get('users',[]);const allTeams=[...S.get('teams',[]),...S.get('top_teams',[])];
   const now=new Date(),y=now.getFullYear(),m=now.getMonth(),dim=new Date(y,m+1,0).getDate();
-  const pl=S.get('planners',{});
   return`<div class="card"><div style="display:flex;flex-direction:column;gap:8px">
     ${items.map(a=>{
       const realIdx=fullArc.indexOf(a);
@@ -3667,7 +3693,7 @@ function _renderArchiveList(items,fullArc,canRestore){
       const{total,done}=getPlannerStats(a.data,dim,y,m);
       const pct=total?Math.round(done/total*100):0;
       const bc=pct>=70?'var(--green)':pct>=40?'#f5c518':'var(--accent2)';
-      return`<div class="clickable-row" onclick="previewArchivePlanner(${realIdx})">
+      return`<div class="clickable-row" onclick="previewArchivePlannerEx(${realIdx},${canRestore},${canDelete})">
         <div style="width:44px;height:44px;border-radius:10px;overflow:hidden;flex-shrink:0;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-size:16px">${ownerAva?`<img src="${ownerAva}" style="width:100%;height:100%;object-fit:cover">`:isTeam?'👥':'👤'}</div>
         <div style="flex:1">
           <div style="font-size:13px;font-weight:700;margin-bottom:2px">📋 ${a.data.name||'Без названия'}</div>
@@ -3679,13 +3705,60 @@ function _renderArchiveList(items,fullArc,canRestore){
             <div style="font-size:16px;font-weight:800;color:${bc}">${pct}%</div>
             <div style="font-size:9px;color:var(--muted)">выполн.</div>
           </div>
-          <button class="btn btn-ghost btn-sm" onclick="previewArchivePlanner(${realIdx})">👁</button>
+          <button class="btn btn-ghost btn-sm" onclick="previewArchivePlannerEx(${realIdx},${canRestore},${canDelete})">👁</button>
           ${canRestore?`<button class="btn btn-success btn-sm" onclick="confirmRestoreArchive(${realIdx})">↩ Восстановить</button>`:''}
-          <button class="btn btn-danger btn-sm" onclick="deleteFromArchiveAndRefresh(${realIdx})" title="Удалить из архива">🗑</button>
+          ${canDelete?`<button class="btn btn-danger btn-sm" onclick="deleteFromArchiveAndRefresh(${realIdx})">🗑</button>`:''}
         </div>
       </div>`;
     }).join('')}
   </div></div>`;
+}
+
+// Extended preview that respects per-tab permissions
+function previewArchivePlannerEx(idx,canRestore,canDelete){
+  const arc=S.get('planner_archive',[]);const a=arc[idx];if(!a)return;
+  const now=new Date(),y=now.getFullYear(),m=now.getMonth(),dim=new Date(y,m+1,0).getDate();
+  const{total,done}=getPlannerStats(a.data,dim,y,m);const pct=total?Math.round(done/total*100):0;
+  const bc=pct>=70?'var(--green)':pct>=40?'var(--accent)':'var(--accent2)';
+  const c=2*Math.PI*28,off=c-(pct/100)*c;
+  const users=S.get('users',[]);const allTeams=[...S.get('teams',[]),...S.get('top_teams',[])];
+  const key=a.plannerKey;const isTeam=key.startsWith('team_');
+  let ownerName;
+  if(isTeam){const t=allTeams.find(t=>'team_'+t.id===key);ownerName=t?'👥 '+t.name:'👥 (удалена)';}
+  else{const u=users.find(u=>u.id===key);ownerName=u?(u.role==='top'?'⭐ ':'👤 ')+u.username:'(удалён)';}
+  showModal(`<div class="modal-title">📋 ${a.data.name||'Без названия'}</div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:16px">${ownerName} · ${a.month} · Архивировал: ${a.archivedBy}</div>
+    <div style="display:flex;align-items:center;gap:16px;background:rgba(108,99,255,.08);border:1px solid rgba(108,99,255,.2);border-radius:12px;padding:14px;margin-bottom:18px">
+      <svg width="66" height="66" style="flex-shrink:0;transform:rotate(-90deg)">
+        <circle cx="33" cy="33" r="28" fill="none" stroke="rgba(255,255,255,.07)" stroke-width="7"/>
+        <circle cx="33" cy="33" r="28" fill="none" stroke="${bc}" stroke-width="7" stroke-linecap="round" stroke-dasharray="${c}" stroke-dashoffset="${off}"/>
+      </svg>
+      <div><div style="font-size:26px;font-weight:800;color:${bc}">${pct}%</div>
+        <div style="display:flex;gap:14px;margin-top:6px">
+          <div><div style="font-size:14px;font-weight:800;color:var(--accent)">${(a.data.tasks||[]).length}</div><div style="font-size:9px;color:var(--muted);text-transform:uppercase">Задач</div></div>
+          <div><div style="font-size:14px;font-weight:800;color:var(--green)">${done}</div><div style="font-size:9px;color:var(--muted);text-transform:uppercase">Сделано</div></div>
+        </div>
+      </div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:5px;max-height:200px;overflow-y:auto;margin-bottom:4px">
+      ${(a.data.tasks||[]).map(t=>{
+        const tds=getTaskDays(t,dim,y,m);const keys=getCompletionKeys(t.completions);
+        const tc=tds.filter(d=>keys.includes(`${y}-${m}-${d}`)).length;
+        const tp=tds.length?Math.round(tc/tds.length*100):0;
+        const bc2=tp>=70?'var(--green)':tp>=40?'#f5c518':'var(--accent2)';
+        return`<div style="display:flex;align-items:center;gap:10px;background:rgba(255,255,255,.04);border-radius:9px;padding:9px 12px">
+          <span style="font-size:15px">${t.emoji||'📌'}</span>
+          <div style="flex:1"><div style="font-size:12px;font-weight:600">${t.name}</div></div>
+          <span style="font-size:11px;font-weight:700;color:${bc2}">${tp}%</span>
+        </div>`;
+      }).join('')}
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal()">Закрыть</button>
+      ${canRestore?`<button class="btn btn-success" onclick="closeModal();confirmRestoreArchive(${idx})">↩ Восстановить</button>`:''}
+      ${canDelete?`<button class="btn btn-danger" onclick="closeModal();deleteFromArchiveAndRefresh(${idx})">🗑 Удалить</button>`:''}
+    </div>`);
+  const mc=document.getElementById('modal-content');if(mc)mc.style.width='500px';
 }
 
 function confirmRestoreArchive(idx){
