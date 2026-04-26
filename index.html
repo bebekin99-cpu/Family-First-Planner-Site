@@ -3867,9 +3867,16 @@ function confirmRestoreArchive(idx){
 }
 
 function deleteFromArchiveAndRefresh(idx){
-  confirmDialog('🗑️','Удалить из архива','Удалить этот планнер из архива безвозвратно?',()=>{
-    const arc=S.get('planner_archive',[]);arc.splice(idx,1);S.set('planner_archive',arc);
-    toast('Удалён из архива','success');renderArchivePage();
+  confirmDialog('🗑️','Удалить из архива','Удалить этот планнер из архива безвозвратно?',async ()=>{
+    const arc=S.get('planner_archive',[]);
+    const item=arc[idx]; if(!item) return;
+    arc.splice(idx,1);
+    _cache['planner_archive']=arc;
+    // Delete from Supabase
+    const {error} = await _sb.from('ffp_archive').delete().eq('id', item.id);
+    if(error) console.error('[deleteFromArchive]', error.message);
+    toast('Удалён из архива','success');
+    renderArchivePage();
   });
 }
 
@@ -3967,35 +3974,55 @@ function restoreFromArchive(idx){
     _doRestoreArchive(idx);
   }
 }
-function _doRestoreArchive(idx){
+async function _doRestoreArchive(idx){
   const arc=S.get('planner_archive',[]);const a=arc[idx];if(!a)return;
   const pl=S.get('planners',{});
-  // Archive the current active planner before restoring
+
+  // If there's already an active planner — archive it first
   if(pl[a.plannerKey]?.tasks?.length){
-    const newArc=S.get('planner_archive',[]);
     const users=S.get('users',[]);const allTeams=[...S.get('teams',[]),...S.get('top_teams',[])];
     const key=a.plannerKey;const isTeam=key.startsWith('team_');
     const ownerLabel=isTeam?(allTeams.find(t=>'team_'+t.id===key)?.name||key):(users.find(u=>u.id===key)?.username||key);
-    newArc.unshift({id:'arch'+Date.now(),plannerKey:key,ownerLabel,data:JSON.parse(JSON.stringify(pl[key])),archivedAt:Date.now(),archivedBy:CU.username,month:new Date().toLocaleString('ru',{month:'long',year:'numeric'})});
-    S.set('planner_archive',newArc);
-    delete pl[key]; // Remove from active before restoring
+    const archItem={id:'arch'+Date.now()+Math.random().toString(36).slice(2),plannerKey:key,ownerLabel,data:JSON.parse(JSON.stringify(pl[key])),archivedAt:Date.now(),archivedBy:CU.username,month:new Date().toLocaleString('ru',{month:'long',year:'numeric'})};
+    const newArc=S.get('planner_archive',[]);
+    newArc.unshift(archItem);
+    _cache['planner_archive']=newArc;
+    // Save archived item to DB
+    await _sb.from('ffp_archive').upsert({id:archItem.id,data:archItem},{onConflict:'id'});
+    // Delete old active planner from DB
+    await _sb.from('ffp_planners').delete().eq('id',key);
+    await _sb.from('task_completions').delete().eq('planner',key);
+    delete pl[key];
   }
-  pl[a.plannerKey]=a.data;S.set('planners',pl);
-  // Remove restored entry from archive
+
+  // Restore the archived planner as active
+  pl[a.plannerKey]=a.data;
+  _cache['planners']=pl;
+  // Write to Supabase
+  await _sb.from('ffp_planners').upsert({id:a.plannerKey,data:a.data},{onConflict:'id'});
+
+  // Remove the restored entry from archive
   const updatedArc=S.get('planner_archive',[]);
   const removeIdx=updatedArc.findIndex(x=>x.id===a.id);
-  if(removeIdx>=0)updatedArc.splice(removeIdx,1);
-  S.set('planner_archive',updatedArc);
+  if(removeIdx>=0){
+    updatedArc.splice(removeIdx,1);
+    _cache['planner_archive']=updatedArc;
+    await _sb.from('ffp_archive').delete().eq('id',a.id);
+  }
+
   toast('Планнер восстановлен! ✓','success');
   renderArchivePage();
 }
 function deleteFromArchive(idx){
-  confirmDialog('🗑️','Удалить из архива','Удалить этот планнер из архива безвозвратно?',()=>{
+  confirmDialog('🗑️','Удалить из архива','Удалить этот планнер из архива безвозвратно?',async ()=>{
     const arc=S.get('planner_archive',[]);
-    const item=arc[idx];
-    arc.splice(idx,1);S.set('planner_archive',arc);
-    if(item?.id) _sb.from('ffp_archive').delete().eq('id',item.id);
-    toast('Удалён из архива','success');renderArchiveList();
+    const item=arc[idx]; if(!item) return;
+    arc.splice(idx,1);
+    _cache['planner_archive']=arc;
+    const {error} = await _sb.from('ffp_archive').delete().eq('id', item.id);
+    if(error) console.error('[deleteFromArchive]', error.message);
+    toast('Удалён из архива','success');
+    renderArchiveList();
   });
 }
 
