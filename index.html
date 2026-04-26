@@ -491,9 +491,12 @@ async function _upsertMany(table, arr) {
   try {
     const rows = arr.map(item => ({ id: item.id, data: item }));
     for(let i = 0; i < rows.length; i += 100) {
-      await _sb.from(table).upsert(rows.slice(i, i+100), {onConflict: 'id'});
+      const {error} = await _sb.from(table).upsert(rows.slice(i, i+100), {onConflict: 'id'});
+      if(error) {
+        console.error(`[${table}] upsert error:`, error.message, error.details || '');
+      }
     }
-  } catch(e) { console.warn(`[${table}] upsert:`, e.message); }
+  } catch(e) { console.error(`[${table}] upsert exception:`, e.message); }
 }
 
 // Upsert single item immediately (used for targeted writes)
@@ -523,21 +526,24 @@ async function _upsertPlanners(obj) {
     const rows = Object.entries(obj).map(([key, val]) => ({ id: key, data: val }));
     if(!rows.length) return;
     for(let i = 0; i < rows.length; i += 100) {
-      await _sb.from('ffp_planners').upsert(rows.slice(i, i+100), {onConflict: 'id'});
+      const {error} = await _sb.from('ffp_planners').upsert(rows.slice(i, i+100), {onConflict: 'id'});
+      if(error) console.error('[ffp_planners] upsert error:', error.message, error.details||'');
     }
-  } catch(e) { console.warn('[ffp_planners] upsert:', e.message); }
+  } catch(e) { console.error('[ffp_planners] upsert exception:', e.message); }
 }
 
-// Upsert single planner key (fast write after toggleTask)
 async function _upsertOnePlanner(key, data) {
-  try { await _sb.from('ffp_planners').upsert({ id: key, data }, {onConflict: 'id'}); }
-  catch(e) { console.warn('[ffp_planners] upsert one:', e.message); }
+  try {
+    const {error} = await _sb.from('ffp_planners').upsert({ id: key, data }, {onConflict: 'id'});
+    if(error) console.error('[ffp_planners] upsert one error:', error.message);
+  } catch(e) { console.error('[ffp_planners] upsert one exception:', e.message); }
 }
 
-// Simple KV store for settings, templates, history
 async function _upsertKV(k, v) {
-  try { await _sb.from('app_data').upsert({ key: k, value: v }, {onConflict: 'key'}); }
-  catch(e) { console.warn(`[app_data:${k}] upsert:`, e.message); }
+  try {
+    const {error} = await _sb.from('app_data').upsert({ key: k, value: v }, {onConflict: 'key'});
+    if(error) console.error(`[app_data:${k}] upsert error:`, error.message);
+  } catch(e) { console.error(`[app_data:${k}] upsert exception:`, e.message); }
 }
 
 // ── LOAD ALL DATA ───────────────────────────────────────────
@@ -1776,7 +1782,7 @@ function saveProfile(){
     if(users.find(u=>u.email===em&&u.id!==CU.id))return toast('Email уже занят другим пользователем','error');
     users[i].email=em;CU.email=em;
   }
-  if(p)users[i].password=p;
+  if(p){users[i].password=p;CU.password=p;}
   const at=myActiveTeam();
   if(at){
     const tn=document.getElementById('edit-team-name')?.value.trim();
@@ -1785,7 +1791,20 @@ function saveProfile(){
       else{const teams=S.get('teams',[]);const ti=teams.findIndex(t=>t.id===CU.teamId);if(ti>=0)teams[ti].name=tn;S.set('teams',teams);}
     }
   }
-  S.set('users',users);toast('Профиль сохранён','success');renderProfile();
+  // Update cache
+  _cache['users'] = users;
+  // Write directly to Supabase — single row upsert for reliability
+  _sb.from('ffp_users').upsert({id: users[i].id, data: users[i]}, {onConflict:'id'})
+    .then(({error}) => {
+      if(error) {
+        console.error('Profile save failed:', error.message);
+        toast('Ошибка сохранения профиля: ' + error.message, 'error');
+      }
+    });
+  // Update session
+  localStorage.setItem('ffp_session_id', CU.id);
+  toast('Профиль сохранён ✓','success');
+  renderProfile();
 }
 
 // MY PLANNER
