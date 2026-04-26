@@ -415,146 +415,253 @@ const _SB_URL = 'https://ycgiruqpjaxytrhkiymh.supabase.co';
 const _SB_KEY = 'sb_publishable__5Wn2BMkXy7AbkAko7Ae_A_TgPAgKg9';
 const _sb = supabase.createClient(_SB_URL, _SB_KEY);
 
-// Local memory cache so synchronous S.get() always works
+// ── LOCAL CACHE ─────────────────────────────────────────────
 const _cache = {};
-
-// All 14 app keys
-const _ALL_KEYS = ['users','teams','top_teams','planners','planner_history',
-  'pending_regs','notifications','planner_reviews','planner_archive',
-  'planner_templates','mindset','notif_sound_data','last_monthly_report','init4'];
-
-// ── Storage API (synchronous interface, async backend) ──────
 const S = {
-  get:(k, d=undefined) => {
-    if(k in _cache) return _cache[k];
-    return d;
-  },
-  set:(k, v) => {
-    _cache[k] = v;
-    // Write to Supabase async (fire-and-forget with retry)
-    _sbWrite(k, v);
-  }
+  get: (k, d=undefined) => (k in _cache ? _cache[k] : d),
+  set: (k, v) => { _cache[k] = v; _dbWrite(k, v); }
 };
 
-// Write a single key to Supabase
-async function _sbWrite(k, v) {
-  try {
-    await _sb.from('app_data').upsert({key: k, value: v}, {onConflict: 'key'});
-  } catch(e) {
-    console.warn('Supabase write failed for', k, e);
+// ── DB WRITE ROUTER ─────────────────────────────────────────
+// All tables use { id, data:JSONB } — no schema mismatch possible
+function _dbWrite(k, v) {
+  switch(k) {
+    case 'users':           return _upsertMany('ffp_users', v);
+    case 'notifications':   return _upsertMany('ffp_notifications', v);
+    case 'planners':        return _upsertPlanners(v);
+    case 'planner_reviews': return _upsertMany('ffp_reviews', v);
+    case 'pending_regs':    return _upsertMany('ffp_pending_regs', v);
+    case 'teams':           return _upsertMany('ffp_teams', v);
+    case 'top_teams':       return _upsertMany('ffp_top_teams', v);
+    case 'planner_archive': return _upsertMany('ffp_archive', v);
+    default:                return _upsertKV(k, v);
   }
 }
 
-// Load ALL keys from Supabase into cache on startup
-async function _sbLoadAll() {
+// Upsert array as {id, data} rows — works for ANY object shape, no column mismatch
+async function _upsertMany(table, arr) {
+  if(!Array.isArray(arr) || !arr.length) return;
   try {
-    const { data, error } = await _sb.from('app_data').select('key, value');
-    if(error) throw error;
-    if(data) {
-      data.forEach(row => { _cache[row.key] = row.value; });
+    const rows = arr.map(item => ({ id: item.id, data: item }));
+    for(let i = 0; i < rows.length; i += 100) {
+      await _sb.from(table).upsert(rows.slice(i, i+100), {onConflict: 'id'});
     }
+  } catch(e) { console.warn(`[${table}] upsert:`, e.message); }
+}
+
+// Upsert single item immediately (used for targeted writes)
+async function _upsertOne(table, item) {
+  try {
+    await _sb.from(table).upsert({ id: item.id, data: item }, {onConflict: 'id'});
+  } catch(e) { console.warn(`[${table}] upsert one:`, e.message); }
+}
+
+// Delete by id
+async function _deleteOne(table, id) {
+  try { await _sb.from(table).delete().eq('id', id); }
+  catch(e) { console.warn(`[${table}] delete:`, e.message); }
+}
+
+// Delete multiple ids
+async function _deleteMany(table, ids) {
+  if(!ids?.length) return;
+  try { await _sb.from(table).delete().in('id', ids); }
+  catch(e) { console.warn(`[${table}] deleteMany:`, e.message); }
+}
+
+// Upsert planners object { plannerKey: plannerData } as {id, data} rows
+async function _upsertPlanners(obj) {
+  if(!obj || typeof obj !== 'object') return;
+  try {
+    const rows = Object.entries(obj).map(([key, val]) => ({ id: key, data: val }));
+    if(!rows.length) return;
+    for(let i = 0; i < rows.length; i += 100) {
+      await _sb.from('ffp_planners').upsert(rows.slice(i, i+100), {onConflict: 'id'});
+    }
+  } catch(e) { console.warn('[ffp_planners] upsert:', e.message); }
+}
+
+// Upsert single planner key (fast write after toggleTask)
+async function _upsertOnePlanner(key, data) {
+  try { await _sb.from('ffp_planners').upsert({ id: key, data }, {onConflict: 'id'}); }
+  catch(e) { console.warn('[ffp_planners] upsert one:', e.message); }
+}
+
+// Simple KV store for settings, templates, history
+async function _upsertKV(k, v) {
+  try { await _sb.from('app_data').upsert({ key: k, value: v }, {onConflict: 'key'}); }
+  catch(e) { console.warn(`[app_data:${k}] upsert:`, e.message); }
+}
+
+// ── LOAD ALL DATA ───────────────────────────────────────────
+async function _loadAll() {
+  try {
+    const [users, notifs, planners, reviews, regs, teams, topTeams, archive, kv, completions] =
+      await Promise.all([
+        _sb.from('ffp_users').select('data'),
+        _sb.from('ffp_notifications').select('data'),
+        _sb.from('ffp_planners').select('id, data'),
+        _sb.from('ffp_reviews').select('data'),
+        _sb.from('ffp_pending_regs').select('data'),
+        _sb.from('ffp_teams').select('data'),
+        _sb.from('ffp_top_teams').select('data'),
+        _sb.from('ffp_archive').select('data'),
+        _sb.from('app_data').select('key, value'),
+        _sb.from('task_completions').select('*'),
+      ]);
+
+    const unwrap = rows => (rows || []).map(r => r.data).filter(Boolean);
+
+    _cache['users']           = unwrap(users.data);
+    _cache['notifications']   = unwrap(notifs.data).sort((a,b)=>(b.time||0)-(a.time||0));
+    _cache['planner_reviews'] = unwrap(reviews.data);
+    _cache['pending_regs']    = unwrap(regs.data);
+    _cache['teams']           = unwrap(teams.data);
+    _cache['top_teams']       = unwrap(topTeams.data);
+    _cache['planner_archive'] = unwrap(archive.data).sort((a,b)=>(b.archivedAt||0)-(a.archivedAt||0));
+
+    // Planners: { id: plannerKey, data: plannerObj }
+    const plannersObj = {};
+    (planners.data || []).forEach(row => { if(row.id && row.data) plannersObj[row.id] = row.data; });
+    _cache['planners'] = plannersObj;
+
+    // KV
+    (kv.data || []).forEach(row => { _cache[row.key] = row.value; });
+
+    // Merge task completions into planners
+    _mergeCompletions(completions.data || []);
     return true;
   } catch(e) {
-    console.error('Supabase load failed:', e);
+    console.error('DB load failed:', e);
     return false;
   }
 }
 
-// Bootstrap: load data, then start app
+function _mergeCompletions(rows) {
+  const pl = _cache['planners'] || {};
+  rows.forEach(row => {
+    if(!pl[row.planner]) return;
+    const task = pl[row.planner].tasks?.find(t => t.id === row.task_id);
+    if(!task) return;
+    task.completions = task.completions || [];
+    if(row.planner.startsWith('team_')) {
+      if(!task.completions.find(c => typeof c==='object' && c.key===row.day_key && c.userId===row.user_id))
+        task.completions.push({key:row.day_key, userId:row.user_id, username:row.username, avatar:row.avatar||''});
+    } else {
+      if(!task.completions.includes(row.day_key)) task.completions.push(row.day_key);
+    }
+  });
+  _cache['planners'] = pl;
+}
+
+// ── ATOMIC TASK COMPLETIONS ─────────────────────────────────
+let _atomicWritePending = null;
+function _atomicSyncAfterToggle(pid, tid, dayKey, added, userData) {
+  const rowId = `${pid}|${tid}|${dayKey}|${userData ? userData.userId : CU?.id}`;
+  if(added) {
+    _sb.from('task_completions').upsert({
+      id: rowId, planner: pid, task_id: tid, day_key: dayKey,
+      user_id: userData.userId, username: userData.username, avatar: userData.avatar||''
+    }, {onConflict: 'id', ignoreDuplicates: true});
+  } else {
+    _sb.from('task_completions').delete().eq('id', rowId);
+  }
+  // Debounced backup write
+  clearTimeout(_atomicWritePending);
+  _atomicWritePending = setTimeout(() => {
+    const pl = _cache['planners'] || {};
+    if(pl[pid]) _upsertOnePlanner(pid, pl[pid]);
+  }, 3000);
+}
+
+// ── REALTIME ─────────────────────────────────────────────────
+function _subscribeRealtime() {
+  // Completions: live ticks
+  _sb.channel('rt_completions')
+    .on('postgres_changes', {event:'INSERT', schema:'public', table:'task_completions'}, p => {
+      const row = p.new;
+      if(row.user_id === CU?.id) return;
+      const pl = _cache['planners'] || {};
+      const task = pl[row.planner]?.tasks?.find(t => t.id === row.task_id);
+      if(!task) return;
+      task.completions = task.completions || [];
+      if(row.planner.startsWith('team_')) {
+        if(!task.completions.find(c => typeof c==='object' && c.key===row.day_key && c.userId===row.user_id))
+          task.completions.push({key:row.day_key, userId:row.user_id, username:row.username, avatar:row.avatar||''});
+      } else {
+        if(!task.completions.includes(row.day_key)) task.completions.push(row.day_key);
+      }
+      _cache['planners'] = pl;
+      try{ if(CU) _fastUpdatePlanner(row.planner, pl[row.planner]); }catch(e){}
+    })
+    .on('postgres_changes', {event:'DELETE', schema:'public', table:'task_completions'}, p => {
+      const row = p.old;
+      if(row.user_id === CU?.id) return;
+      const pl = _cache['planners'] || {};
+      const task = pl[row.planner]?.tasks?.find(t => t.id === row.task_id);
+      if(!task) return;
+      if(row.planner.startsWith('team_'))
+        task.completions = (task.completions||[]).filter(c => !(typeof c==='object' && c.key===row.day_key && c.userId===row.user_id));
+      else
+        task.completions = (task.completions||[]).filter(c => c !== row.day_key);
+      _cache['planners'] = pl;
+      try{ if(CU) _fastUpdatePlanner(row.planner, pl[row.planner]); }catch(e){}
+    })
+    .subscribe();
+
+  // New planners
+  _sb.channel('rt_planners')
+    .on('postgres_changes', {event:'*', schema:'public', table:'ffp_planners'}, p => {
+      const pl = _cache['planners'] || {};
+      if(p.eventType === 'DELETE') delete pl[p.old?.id];
+      else if(p.new?.data) pl[p.new.id] = p.new.data;
+      _cache['planners'] = pl;
+    })
+    .subscribe();
+
+  // New notifications
+  _sb.channel('rt_notifications')
+    .on('postgres_changes', {event:'INSERT', schema:'public', table:'ffp_notifications'}, p => {
+      if(!p.new?.data) return;
+      const n = p.new.data;
+      if(!CU || n.forUserId !== CU.id) return;
+      const notifs = _cache['notifications'] || [];
+      if(!notifs.find(x => x.id === n.id)) {
+        notifs.unshift(n);
+        _cache['notifications'] = notifs;
+        _triggerNotification('Новое уведомление', 'info');
+        updateNotifBadge();
+      }
+    })
+    .subscribe();
+}
+
+// ── BOOTSTRAP ────────────────────────────────────────────────
 async function _bootstrap() {
   const loadEl = document.getElementById('db-loading');
-  const msgEl = document.getElementById('db-load-msg');
-
+  const msgEl  = document.getElementById('db-load-msg');
   try {
-    msgEl.textContent = 'Загрузка данных…';
-    const ok = await _sbLoadAll();
-    if(!ok) {
-      msgEl.textContent = '⚠️ Ошибка подключения. Перезагрузите страницу.';
-      return;
-    }
+    msgEl.textContent = 'Подключение к базе данных…';
+    const ok = await _loadAll();
+    if(!ok) { msgEl.textContent = '⚠️ Ошибка подключения. Перезагрузите страницу.'; return; }
     msgEl.textContent = 'Готово!';
-    await new Promise(r => setTimeout(r, 300));
+    await new Promise(r => setTimeout(r, 250));
   } catch(e) {
     msgEl.textContent = '⚠️ Ошибка. Перезагрузите страницу.';
     return;
   }
-
-  // Hide loader and start app
   if(loadEl) loadEl.style.display = 'none';
   initData();
+  _subscribeRealtime();
+  const savedId = localStorage.getItem('ffp_session_id');
+  if(savedId) {
+    const u = (_cache['users']||[]).find(u => u.id === savedId && u.approved);
+    if(u) { CU = u; _initApp(); showApp(); return; }
+    else localStorage.removeItem('ffp_session_id');
+  }
   _initApp();
 }
 
-
-// ── NOTIFICATION SOUND & TAB INDICATOR ─────────────────────
-let _notifAudio=null;
-let _tabHasAlert=false;
-let _origTitle=document.title;
-let _tabBlinkInterval=null;
-
-function _loadNotifSound(){
-  const s=S.get('notif_sound_data','');
-  if(s){
-    _notifAudio=new Audio(s);
-    _notifAudio.volume=0.7;
-  }
-}
-
-function _playNotifSound(){
-  if(_notifAudio){try{_notifAudio.currentTime=0;_notifAudio.play().catch(()=>{});}catch(e){}}
-}
-
-function _startTabAlert(){
-  if(_tabBlinkInterval)return;
-  _tabHasAlert=true;
-  let state=false;
-  // Set favicon to red dot
-  _setFaviconAlert(true);
-  _tabBlinkInterval=setInterval(()=>{
-    state=!state;
-    document.title=state?'🔴 Новое уведомление — Family First Planner':_origTitle;
-  },1200);
-}
-
-function _stopTabAlert(){
-  if(_tabBlinkInterval){clearInterval(_tabBlinkInterval);_tabBlinkInterval=null;}
-  _tabHasAlert=false;
-  document.title=_origTitle;
-  _setFaviconAlert(false);
-}
-
-function _setFaviconAlert(alert){
-  const link=document.querySelector("link[rel='icon']");
-  if(!link)return;
-  if(alert){
-    link.href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='bg' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%236c63ff'/%3E%3Cstop offset='100%25' stop-color='%23ff6584'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='16' fill='url(%23bg)'/%3E%3Ctext x='28' y='46' font-family='Arial Black,Arial' font-size='34' font-weight='900' text-anchor='middle' fill='white'%3EFF%3C/text%3E%3Ccircle cx='50' cy='14' r='12' fill='%23ef4444'/%3E%3Ccircle cx='50' cy='14' r='9' fill='%23ff6b6b'/%3E%3C/svg%3E";
-  } else {
-    link.href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='bg' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%236c63ff'/%3E%3Cstop offset='50%25' stop-color='%23a855f7'/%3E%3Cstop offset='100%25' stop-color='%23ff6584'/%3E%3C/linearGradient%3E%3ClinearGradient id='sh' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%23fff' stop-opacity='0.9'/%3E%3Cstop offset='100%25' stop-color='%23ffd700' stop-opacity='0.95'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='16' fill='url(%23bg)'/%3E%3Ccircle cx='52' cy='12' r='7' fill='%23ffd700' opacity='0.95'/%3E%3Ctext x='32' y='46' font-family='Arial Black,Arial' font-size='34' font-weight='900' text-anchor='middle' fill='url(%23sh)'%3EFF%3C/text%3E%3C/svg%3E";
-  }
-}
-
-// Reset alert when user focuses window
-window.addEventListener('focus',()=>{if(_tabHasAlert)_stopTabAlert();});
-
-// Inject notification with sound + tab alert
-function _triggerNotification(msg,type='info'){
-  toast(msg,type);
-  _playNotifSound();
-  if(!document.hasFocus())_startTabAlert();
-  updateNotifBadge();
-}
-
-
-function initData(){
-  if(!S.get('init4',false)){
-    S.set('users',[
-      {id:'owner1',username:'Owner',email:'owner@ffp.com',password:'owner123',role:'owner',avatar:'',teamId:null,topTeamId:null,approved:true,canCreatePlanner:true},
-      {id:'top1',username:'TopAdmin',email:'admin@ffp.com',password:'admin123',role:'top',avatar:'',teamId:null,topTeamId:null,approved:true,canCreatePlanner:true}
-    ]);
-    S.set('teams',[]);S.set('top_teams',[]);S.set('planners',{});S.set('planner_history',{});
-    S.set('pending_regs',[]);S.set('notifications',[]);S.set('mindset',{});S.set('planner_reviews',[]);S.set('init4',true);
-  }
-}
 // ── App globals ─────────────────────────────────────────────
 let CU=null,cpTasks=[],cpType='individual',apTab='individual',tpTab='individual',ratingTab='users',myPlannerView='individual',viewingId=null,activeWeekIdx=null,drillCtx='';
 
@@ -585,7 +692,9 @@ function doLogin(){
   const u=S.get('users',[]).find(u=>u.email===email&&u.password===pass);
   if(!u)return toast('Неверный email или пароль','error');
   if(!u.approved)return toast('Аккаунт ожидает подтверждения Owner','error');
-  CU=u;showApp();
+  CU=u;
+  localStorage.setItem('ffp_session_id', u.id);
+  showApp();
   _loadNotifSound();
   setTimeout(_checkMonthlyReport, 5000);
 }
@@ -608,7 +717,9 @@ function doRegister(){
   toast('Запрос отправлен! Ожидайте подтверждения Owner.','info');switchAuthTab('login');
 }
 function doLogout(){
-  CU=null;document.getElementById('app').classList.remove('show');document.getElementById('app').style.display='none';
+  CU=null;
+  localStorage.removeItem('ffp_session_id');
+  document.getElementById('app').classList.remove('show');document.getElementById('app').style.display='none';
   document.getElementById('landing').classList.remove('hide');document.getElementById('notif-toggle-btn').style.display='none';
   document.getElementById('notif-panel').classList.remove('open');
   // Hide dev panel on logout
@@ -823,14 +934,32 @@ function toggleTask(pid,tid,key){
       const existing=t.completions[idx];
       if(typeof existing==='object'&&existing.userId!==CU.id&&CU.role!=='owner'){toast(`Отметка поставлена ${existing.username} — нельзя снять чужую галочку`,'error');return;}
       t.completions.splice(idx,1);
+      S.set('planners',pl);
+      _fastUpdatePlanner(pid,pl[pid]);
+      // Atomic delete from task_completions
+      _atomicSyncAfterToggle(pid, tid, key, false, null);
     } else {
-      t.completions.push({key,userId:CU.id,username:CU.username,avatar:CU.avatar||''});
+      const userData={userId:CU.id,username:CU.username,avatar:CU.avatar||''};
+      t.completions.push({key,...userData});
+      S.set('planners',pl);
+      _fastUpdatePlanner(pid,pl[pid]);
+      // Atomic insert into task_completions
+      _atomicSyncAfterToggle(pid, tid, key, true, userData);
     }
   } else {
-    const i=t.completions.indexOf(key);if(i>=0)t.completions.splice(i,1);else t.completions.push(key);
+    const i=t.completions.indexOf(key);
+    if(i>=0){
+      t.completions.splice(i,1);
+      S.set('planners',pl);
+      _fastUpdatePlanner(pid,pl[pid]);
+      _atomicSyncAfterToggle(pid, tid, key, false, null);
+    } else {
+      t.completions.push(key);
+      S.set('planners',pl);
+      _fastUpdatePlanner(pid,pl[pid]);
+      _atomicSyncAfterToggle(pid, tid, key, true, {userId:CU.id,username:CU.username,avatar:CU.avatar||''});
+    }
   }
-  S.set('planners',pl);
-  _fastUpdatePlanner(pid,pl[pid]);
 }
 
 // Normalize completions: always returns array of key strings for stat calculations
@@ -1945,8 +2074,12 @@ function deleteTopTeam(tid){
   const teams=S.get('top_teams',[]);const t=teams.find(t=>t.id===tid);
   confirmDialog('🗑️','Удалить',`Команда "${t?.name||''}" будет удалена.`,()=>{
     S.set('top_teams',S.get('top_teams',[]).filter(t=>t.id!==tid));
+    _sb.from('ffp_top_teams').delete().eq('id',tid);
     const users=S.get('users',[]);users.forEach(u=>{if(u.topTeamId===tid)u.topTeamId=null;});S.set('users',users);
-    const pl=S.get('planners',{});delete pl['team_'+tid];S.set('planners',pl);toast('Удалена','success');_refreshTeamPages();
+    const pl=S.get('planners',{});delete pl['team_'+tid];S.set('planners',pl);
+    _sb.from('ffp_planners').delete().eq('planner_key','team_'+tid);
+    _sb.from('task_completions').delete().eq('planner','team_'+tid);
+    toast('Удалена','success');_refreshTeamPages();
   });
 }
 
@@ -2129,8 +2262,12 @@ function deleteTeam(tid){
   const teams=S.get('teams',[]);const t=teams.find(t=>t.id===tid);
   confirmDialog('🗑️','Удалить',`Команда "${t?.name||''}" будет удалена.`,()=>{
     S.set('teams',S.get('teams',[]).filter(t=>t.id!==tid));
+    _sb.from('ffp_teams').delete().eq('id',tid);
     const users=S.get('users',[]);users.forEach(u=>{if(u.teamId===tid)u.teamId=null;});S.set('users',users);
-    const pl=S.get('planners',{});delete pl['team_'+tid];S.set('planners',pl);toast('Удалена','success');_refreshTeamPages();
+    const pl=S.get('planners',{});delete pl['team_'+tid];S.set('planners',pl);
+    _sb.from('ffp_planners').delete().eq('planner_key','team_'+tid);
+    _sb.from('task_completions').delete().eq('planner','team_'+tid);
+    toast('Удалена','success');_refreshTeamPages();
   });
 }
 
@@ -2543,13 +2680,20 @@ function saveQuickPlanner(uid){
 function approveUser(uid){
   const users=S.get('users',[]);const u=users.find(u=>u.id===uid);if(u)u.approved=true;S.set('users',users);
   S.set('pending_regs',S.get('pending_regs',[]).filter(p=>p.id!==uid));
+  _sb.from('ffp_pending_regs').delete().eq('id',uid);
+  const regNotifIds=S.get('notifications',[]).filter(n=>n.type==='reg'&&n.userId===uid).map(n=>n.id);
   S.set('notifications',S.get('notifications',[]).filter(n=>!(n.type==='reg'&&n.userId===uid)));
+  if(regNotifIds.length) _sb.from('ffp_notifications').delete().in('id',regNotifIds);
   toast('Пользователь принят!','success');updateNotifBadge();updateAdminBadge();renderNotifications();_refreshActivePage();
 }
 function rejectUser(uid){
   S.set('users',S.get('users',[]).filter(u=>u.id!==uid));
+  _sb.from('ffp_users').delete().eq('id',uid);
   S.set('pending_regs',S.get('pending_regs',[]).filter(p=>p.id!==uid));
+  _sb.from('ffp_pending_regs').delete().eq('id',uid);
+  const regNotifIds=S.get('notifications',[]).filter(n=>n.type==='reg'&&n.userId===uid).map(n=>n.id);
   S.set('notifications',S.get('notifications',[]).filter(n=>!(n.type==='reg'&&n.userId===uid)));
+  if(regNotifIds.length) _sb.from('ffp_notifications').delete().in('id',regNotifIds);
   toast('Отклонён','error');updateAdminBadge();updateNotifBadge();renderNotifications();_refreshActivePage();
 }
 // KEY OWNER FUNCTION: повышение администратора до Топ администратора
@@ -2617,7 +2761,12 @@ function deleteUser(uid){
   const users=S.get('users',[]);const u=users.find(u=>u.id===uid);
   confirmDialog('🗑️','Удалить',`"${u?.username||''}" будет удалён безвозвратно.`,()=>{
     S.set('users',S.get('users',[]).filter(u=>u.id!==uid));
-    const pl=S.get('planners',{});delete pl[uid];S.set('planners',pl);toast('Удалён','success');_refreshActivePage();
+    _sb.from('ffp_users').delete().eq('id',uid);
+    const pl=S.get('planners',{});delete pl[uid];S.set('planners',pl);
+    _sb.from('ffp_planners').delete().eq('planner_key',uid);
+    _sb.from('task_completions').delete().eq('planner',uid);
+    _sb.from('task_completions').delete().eq('user_id',uid);
+    toast('Удалён','success');_refreshActivePage();
   });
 }
 
@@ -3048,13 +3197,14 @@ function approvePlannerReview(revId){
   const rev=reviews.find(r=>r.id===revId);if(!rev)return;
   rev.status='approved';S.set('planner_reviews',reviews);
   const pl=S.get('planners',{});
-  // ind_userId → publish as individual planner (pl[userId])
   const isIndividual=rev.teamPid.startsWith('ind_');
   const targetKey=isIndividual?rev.teamPid.slice(4):rev.teamPid;
   pl[targetKey]=rev.plannerData;S.set('planners',pl);
-  // Send new planner notification to targets
   setTimeout(()=>_sendNewPlannerNotifications(targetKey,rev.plannerData.name,!isIndividual),100);
+  // Delete review notification rows from DB
+  const revNotifIds=S.get('notifications',[]).filter(n=>n.type==='planner_review'&&n.reviewId===revId).map(n=>n.id);
   S.set('notifications',S.get('notifications',[]).filter(n=>!(n.type==='planner_review'&&n.reviewId===revId)));
+  if(revNotifIds.length) _sb.from('ffp_notifications').delete().in('id',revNotifIds);
   const notifs=S.get('notifications',[]);
   notifs.unshift({id:'n'+Date.now(),type:'review_result',result:'approved',plannerName:rev.plannerData.name,forUserId:rev.authorId,time:Date.now(),read:false});
   S.set('notifications',notifs);
@@ -3075,8 +3225,9 @@ function doRejectPlannerReview(revId){
   const reviews=S.get('planner_reviews',[]);
   const rev=reviews.find(r=>r.id===revId);if(!rev)return;
   rev.status='rejected';rev.rejectReason=reason;S.set('planner_reviews',reviews);
-  // Remove the review notification after action
+  const revNotifIds=S.get('notifications',[]).filter(n=>n.type==='planner_review'&&n.reviewId===revId).map(n=>n.id);
   S.set('notifications',S.get('notifications',[]).filter(n=>!(n.type==='planner_review'&&n.reviewId===revId)));
+  if(revNotifIds.length) _sb.from('ffp_notifications').delete().in('id',revNotifIds);
   const notifs=S.get('notifications',[]);
   notifs.unshift({id:'n'+Date.now(),type:'review_result',result:'rejected',plannerName:rev.plannerData.name,reason,forUserId:rev.authorId,time:Date.now(),read:false});
   S.set('notifications',notifs);
@@ -3088,6 +3239,7 @@ function doRejectPlannerReview(revId){
 
 function dismissNotif(nid){
   S.set('notifications',S.get('notifications',[]).filter(n=>n.id!==nid));
+  _sb.from('ffp_notifications').delete().eq('id',nid);
   renderNotifications();updateNotifBadge();
 }
 
@@ -3332,7 +3484,10 @@ function _doRestoreArchive(idx){
 }
 function deleteFromArchive(idx){
   confirmDialog('🗑️','Удалить из архива','Удалить этот планнер из архива безвозвратно?',()=>{
-    const arc=S.get('planner_archive',[]);arc.splice(idx,1);S.set('planner_archive',arc);
+    const arc=S.get('planner_archive',[]);
+    const item=arc[idx];
+    arc.splice(idx,1);S.set('planner_archive',arc);
+    if(item?.id) _sb.from('ffp_archive').delete().eq('id',item.id);
     toast('Удалён из архива','success');renderArchiveList();
   });
 }
@@ -4062,9 +4217,13 @@ function _doSavePlanner(mode){
       const allU=S.get('users',[]);const allT=[...teams,...topTeams];
       const isTeam=key.startsWith('team_');
       const ownerLabel=label||(isTeam?(allT.find(t=>'team_'+t.id===key)?.name||key):(allU.find(u=>u.id===key)?.username||key));
-      arc.unshift({id:'arch'+Date.now()+Math.random().toString(36).slice(2),plannerKey:key,ownerLabel,data:JSON.parse(JSON.stringify(pl[key])),archivedAt:Date.now(),archivedBy:CU.username,month:new Date().toLocaleString('ru',{month:'long',year:'numeric'})});
+      const archItem={id:'arch'+Date.now()+Math.random().toString(36).slice(2),plannerKey:key,ownerLabel,data:JSON.parse(JSON.stringify(pl[key])),archivedAt:Date.now(),archivedBy:CU.username,month:new Date().toLocaleString('ru',{month:'long',year:'numeric'})};
+      arc.unshift(archItem);
       S.set('planner_archive',arc);
-      delete pl[key]; // Remove from active planners
+      delete pl[key];
+      // Remove old planner row and its completions from DB
+      _sb.from('ffp_planners').delete().eq('planner_key',key);
+      _sb.from('task_completions').delete().eq('planner',key);
     }
   };
   // Helper: save with archive + conflict check
@@ -4201,14 +4360,9 @@ function deleteReview(reviewId, uid){
   if(!rev)return;
   if(rev.status==='pending'){toast('Нельзя удалить заявку на рассмотрении','error');return;}
   S.set('planner_reviews',reviews.filter(r=>r.id!==reviewId));
+  _sb.from('ffp_reviews').delete().eq('id',reviewId);
   toast('Уведомление удалено','info');
-  if(uid){
-    // Re-open user card with updated data
-    openUserCard(uid);
-  } else {
-    // In create planner page — refresh reviews list
-    renderMyReviews();
-  }
+  if(uid){ openUserCard(uid); } else { renderMyReviews(); }
 }
 
 function renderExistingPlanners(){
@@ -4372,6 +4526,8 @@ function devLogin(email, pass){
   // Perform login
   setTimeout(()=>{
     doLogin();
+    // Save the newly logged-in user's session
+    if(CU) localStorage.setItem('ffp_session_id', CU.id);
     _devUpdateLabel();
     _devPopulateAdmins();
   },50);
@@ -4470,25 +4626,6 @@ window.showApp=function(){
   _origShowApp();
   setTimeout(()=>{_devUpdateLabel();_devPopulateAdmins();},800);
 };
-
-// ── Supabase realtime: sync changes from other sessions ─────
-// Subscribe to app_data changes so all open tabs stay in sync
-function _sbSubscribeRealtime(){
-  _sb.channel('app_data_changes')
-    .on('postgres_changes',{event:'*',schema:'public',table:'app_data'},
-      payload=>{
-        if(payload.new && payload.new.key){
-          _cache[payload.new.key]=payload.new.value;
-          // Re-render relevant parts if app is open
-          if(CU){
-            const k=payload.new.key;
-            if(k==='notifications')updateNotifBadge();
-            if(k==='planners'||k==='planner_history'){}// will re-render on next navigation
-          }
-        }
-      })
-    .subscribe();
-}
 </script>
 </body>
 </html>
