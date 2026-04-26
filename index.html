@@ -266,11 +266,13 @@ textarea.form-input{resize:vertical;min-height:72px;}
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 </head>
 <body>
-<!-- DB Loading overlay -->
-<div id="db-loading" style="position:fixed;inset:0;background:var(--bg,#0d1117);z-index:999999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px">
-  <div style="width:52px;height:52px;border-radius:50%;border:3px solid rgba(108,99,255,.25);border-top-color:#8B5CF6;animation:spin .8s linear infinite"></div>
-  <div id="db-load-msg" style="color:rgba(255,255,255,.6);font-family:'Segoe UI',system-ui,sans-serif;font-size:13px;letter-spacing:1px">Подключение к базе данных…</div>
-  <style>@keyframes spin{to{transform:rotate(360deg)}}</style>
+<!-- DB Loading — thin top bar, not fullscreen blocker -->
+<div id="db-loading" style="position:fixed;top:0;left:0;right:0;z-index:999999;display:flex;flex-direction:column">
+  <div style="height:3px;background:linear-gradient(90deg,var(--accent,#8B5CF6),var(--accent2,#EC4899));animation:db-bar 1.8s ease-in-out infinite;transform-origin:left"></div>
+  <div id="db-load-msg" style="display:none"></div>
+  <style>
+    @keyframes db-bar{0%{transform:scaleX(0);opacity:1}70%{transform:scaleX(0.85);opacity:1}100%{transform:scaleX(1);opacity:0}}
+  </style>
 </div>
 
 <div id="toast-container"></div>
@@ -575,12 +577,35 @@ function _atomicSyncAfterToggle(pid, tid, dayKey, added, userData) {
 }
 
 // ── REALTIME ─────────────────────────────────────────────────
+// ── HELPER: re-render the currently active page ──────────────
+function _refreshActiveLive() {
+  if(!CU) return;
+  try {
+    const pid = document.querySelector('.page.active')?.id;
+    if(!pid) return;
+    if(pid==='page-my-planner')       { try{renderMyPlannerContent();}catch(e){} }
+    else if(pid==='page-planners')    { try{renderAllPlanners();}catch(e){} }
+    else if(pid==='page-top-planners'){ try{renderTopPlanners();}catch(e){} }
+    else if(pid==='page-admin-planners'){ try{renderAdminPlanners();}catch(e){} }
+    else if(pid==='page-rating')      { try{renderRatingContent();}catch(e){} }
+    else if(pid==='page-all-teams')   { try{renderAllTeams();}catch(e){} }
+    else if(pid==='page-teams')       { try{renderTeams();}catch(e){} }
+    else if(pid==='page-top-teams')   { try{renderTopTeams();}catch(e){} }
+    else if(pid==='page-my-team')     { try{renderMyTeam();}catch(e){} }
+    else if(pid==='page-admins')      { try{renderAdmins();}catch(e){} }
+    else if(pid==='page-profile')     { try{renderProfile();}catch(e){} }
+    else if(pid==='page-archive-page'){ try{renderArchivePage();}catch(e){} }
+    else if(pid==='page-create-planner'){ try{renderExistingPlanners();renderMyReviews();}catch(e){} }
+  } catch(e) {}
+}
+
 function _subscribeRealtime() {
-  // Completions: live ticks
+
+  // ── TASK COMPLETIONS — live ticks ─────────────────────────
   _sb.channel('rt_completions')
     .on('postgres_changes', {event:'INSERT', schema:'public', table:'task_completions'}, p => {
       const row = p.new;
-      if(row.user_id === CU?.id) return;
+      if(row.user_id === CU?.id) return; // already applied locally
       const pl = _cache['planners'] || {};
       const task = pl[row.planner]?.tasks?.find(t => t.id === row.task_id);
       if(!task) return;
@@ -609,57 +634,215 @@ function _subscribeRealtime() {
     })
     .subscribe();
 
-  // New planners
+  // ── PLANNERS — live create/update/delete ──────────────────
   _sb.channel('rt_planners')
     .on('postgres_changes', {event:'*', schema:'public', table:'ffp_planners'}, p => {
       const pl = _cache['planners'] || {};
       if(p.eventType === 'DELETE') delete pl[p.old?.id];
       else if(p.new?.data) pl[p.new.id] = p.new.data;
       _cache['planners'] = pl;
+      _refreshActiveLive();
     })
     .subscribe();
 
-  // New notifications
+  // ── NOTIFICATIONS — live receive ──────────────────────────
   _sb.channel('rt_notifications')
     .on('postgres_changes', {event:'INSERT', schema:'public', table:'ffp_notifications'}, p => {
       if(!p.new?.data) return;
       const n = p.new.data;
-      if(!CU || n.forUserId !== CU.id) return;
+      // Show to: owner/top get all management notifs; each user gets their own
+      const isForMe = CU && (
+        n.forUserId === CU.id ||
+        (CU.role==='owner' && ['reg','planner_review'].includes(n.type)) ||
+        (CU.role==='top'   && ['reg','planner_review'].includes(n.type))
+      );
+      if(!isForMe) return;
       const notifs = _cache['notifications'] || [];
       if(!notifs.find(x => x.id === n.id)) {
         notifs.unshift(n);
         _cache['notifications'] = notifs;
-        _triggerNotification('Новое уведомление', 'info');
+        _triggerNotification(
+          n.type==='reg' ? '📨 Новая заявка на регистрацию' :
+          n.type==='planner_review' ? '📋 Новая заявка на планнер' :
+          'Новое уведомление', 'info');
         updateNotifBadge();
+        if(document.getElementById('notif-panel')?.classList.contains('open')) renderNotifications();
       }
+    })
+    .on('postgres_changes', {event:'DELETE', schema:'public', table:'ffp_notifications'}, p => {
+      if(!p.old?.id) return;
+      const notifs = _cache['notifications'] || [];
+      _cache['notifications'] = notifs.filter(n => n.id !== p.old.id);
+      updateNotifBadge();
+      if(document.getElementById('notif-panel')?.classList.contains('open')) renderNotifications();
+    })
+    .subscribe();
+
+  // ── USERS — live role/profile changes ────────────────────
+  _sb.channel('rt_users')
+    .on('postgres_changes', {event:'*', schema:'public', table:'ffp_users'}, p => {
+      const users = _cache['users'] || [];
+      if(p.eventType === 'DELETE') {
+        _cache['users'] = users.filter(u => u.id !== p.old?.id);
+        // If current user was deleted — force logout
+        if(CU && p.old?.id === CU.id) { doLogout(); return; }
+      } else if(p.new?.data) {
+        const idx = users.findIndex(u => u.id === p.new.data.id);
+        if(idx >= 0) users[idx] = p.new.data;
+        else users.push(p.new.data);
+        _cache['users'] = users;
+        // Update own session if profile changed externally
+        if(CU && p.new.data.id === CU.id) {
+          Object.assign(CU, p.new.data);
+          localStorage.setItem('ffp_session_id', CU.id);
+        }
+      }
+      _refreshActiveLive();
+    })
+    .subscribe();
+
+  // ── TEAMS ─────────────────────────────────────────────────
+  _sb.channel('rt_teams')
+    .on('postgres_changes', {event:'*', schema:'public', table:'ffp_teams'}, p => {
+      const teams = _cache['teams'] || [];
+      if(p.eventType === 'DELETE') _cache['teams'] = teams.filter(t => t.id !== p.old?.id);
+      else if(p.new?.data) {
+        const idx = teams.findIndex(t => t.id === p.new.data.id);
+        if(idx >= 0) teams[idx] = p.new.data; else teams.push(p.new.data);
+        _cache['teams'] = teams;
+      }
+      _refreshActiveLive();
+    })
+    .on('postgres_changes', {event:'*', schema:'public', table:'ffp_top_teams'}, p => {
+      const teams = _cache['top_teams'] || [];
+      if(p.eventType === 'DELETE') _cache['top_teams'] = teams.filter(t => t.id !== p.old?.id);
+      else if(p.new?.data) {
+        const idx = teams.findIndex(t => t.id === p.new.data.id);
+        if(idx >= 0) teams[idx] = p.new.data; else teams.push(p.new.data);
+        _cache['top_teams'] = teams;
+      }
+      _refreshActiveLive();
+    })
+    .subscribe();
+
+  // ── PLANNER REVIEWS ───────────────────────────────────────
+  _sb.channel('rt_reviews')
+    .on('postgres_changes', {event:'*', schema:'public', table:'ffp_reviews'}, p => {
+      const reviews = _cache['planner_reviews'] || [];
+      if(p.eventType === 'DELETE') _cache['planner_reviews'] = reviews.filter(r => r.id !== p.old?.id);
+      else if(p.new?.data) {
+        const idx = reviews.findIndex(r => r.id === p.new.data.id);
+        if(idx >= 0) reviews[idx] = p.new.data; else reviews.push(p.new.data);
+        _cache['planner_reviews'] = reviews;
+      }
+      _refreshActiveLive();
+    })
+    .subscribe();
+
+  // ── PENDING REGISTRATIONS ─────────────────────────────────
+  _sb.channel('rt_regs')
+    .on('postgres_changes', {event:'*', schema:'public', table:'ffp_pending_regs'}, p => {
+      const regs = _cache['pending_regs'] || [];
+      if(p.eventType === 'DELETE') _cache['pending_regs'] = regs.filter(r => r.id !== p.old?.id);
+      else if(p.new?.data) {
+        if(!regs.find(r => r.id === p.new.data.id)) regs.unshift(p.new.data);
+        _cache['pending_regs'] = regs;
+      }
+      updateAdminBadge();
+      _refreshActiveLive();
+    })
+    .subscribe();
+
+  // ── ARCHIVE ───────────────────────────────────────────────
+  _sb.channel('rt_archive')
+    .on('postgres_changes', {event:'*', schema:'public', table:'ffp_archive'}, p => {
+      const arc = _cache['planner_archive'] || [];
+      if(p.eventType === 'DELETE') _cache['planner_archive'] = arc.filter(a => a.id !== p.old?.id);
+      else if(p.new?.data) {
+        if(!arc.find(a => a.id === p.new.data.id)) arc.unshift(p.new.data);
+        _cache['planner_archive'] = arc;
+      }
+      _refreshActiveLive();
     })
     .subscribe();
 }
 
+
 // ── BOOTSTRAP ────────────────────────────────────────────────
 async function _bootstrap() {
   const loadEl = document.getElementById('db-loading');
-  const msgEl  = document.getElementById('db-load-msg');
-  try {
-    msgEl.textContent = 'Подключение к базе данных…';
-    const ok = await _loadAll();
-    if(!ok) { msgEl.textContent = '⚠️ Ошибка подключения. Перезагрузите страницу.'; return; }
-    msgEl.textContent = 'Готово!';
-    await new Promise(r => setTimeout(r, 250));
-  } catch(e) {
-    msgEl.textContent = '⚠️ Ошибка. Перезагрузите страницу.';
-    return;
-  }
-  if(loadEl) loadEl.style.display = 'none';
-  initData();
-  _subscribeRealtime();
   const savedId = localStorage.getItem('ffp_session_id');
+  const savedPage = localStorage.getItem('ffp_last_page') || 'profile';
+
+  // If user was logged in — show app shell IMMEDIATELY, no waiting
   if(savedId) {
-    const u = (_cache['users']||[]).find(u => u.id === savedId && u.approved);
-    if(u) { CU = u; _initApp(); showApp(); return; }
-    else localStorage.removeItem('ffp_session_id');
+    // Show the app skeleton right away (no landing, no spinner)
+    initData(); // init with empty cache — will be filled by DB
+    CU = { id: savedId, username: '…', role: 'owner', approved: true }; // temp placeholder
+    _initApp();
+    // Show app immediately
+    document.getElementById('landing').style.display = 'none';
+    document.getElementById('app').style.display = 'flex';
+    document.getElementById('app').classList.add('show');
+    buildNav();
+    // Show skeleton page (empty state renders fast)
+    try {
+      const pe = document.getElementById('page-' + savedPage);
+      if(pe) {
+        document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+        pe.classList.add('active');
+        const ne = document.getElementById('nav-' + savedPage);
+        if(ne) { document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active')); ne.classList.add('active'); }
+      }
+    } catch(e) {}
+
+    // Load real data in background
+    const ok = await _loadAll();
+    if(!ok) {
+      // DB failed — back to login
+      CU = null;
+      localStorage.removeItem('ffp_session_id');
+      document.getElementById('app').style.display = 'none';
+      document.getElementById('app').classList.remove('show');
+      document.getElementById('landing').style.display = '';
+      if(loadEl) loadEl.style.display = 'none';
+      return;
+    }
+
+    // Find real user from loaded data
+    const realUser = (_cache['users'] || []).find(u => u.id === savedId && u.approved);
+    if(!realUser) {
+      // User no longer exists or not approved
+      CU = null;
+      localStorage.removeItem('ffp_session_id');
+      document.getElementById('app').style.display = 'none';
+      document.getElementById('app').classList.remove('show');
+      document.getElementById('landing').style.display = '';
+      if(loadEl) loadEl.style.display = 'none';
+      return;
+    }
+
+    // Update with real data and re-render page properly
+    CU = realUser;
+    if(loadEl) loadEl.style.display = 'none';
+    _subscribeRealtime();
+    buildNav(); // rebuild nav with real role
+    navigateTo(savedPage); // render real page content
+    if(CU.role==='owner'||CU.role==='top') {
+      document.getElementById('notif-toggle-btn').style.display='flex';
+      updateNotifBadge();
+    } else {
+      updateAdminNotif();
+    }
+    const devPanel = document.getElementById('dev-switcher');
+    if(devPanel && CU.role==='owner') devPanel.style.display = 'flex';
+
+  } else {
+    // No session — normal boot (show landing immediately)
+    if(loadEl) loadEl.style.display = 'none'; // hide bar, not needed for login page
+    initData();
+    _initApp();
   }
-  _initApp();
 }
 
 // ── App globals ─────────────────────────────────────────────
@@ -730,6 +913,7 @@ function doRegister(){
 function doLogout(){
   CU=null;
   localStorage.removeItem('ffp_session_id');
+  localStorage.removeItem('ffp_last_page');
   document.getElementById('app').classList.remove('show');document.getElementById('app').style.display='none';
   document.getElementById('landing').classList.remove('hide');document.getElementById('notif-toggle-btn').style.display='none';
   document.getElementById('notif-panel').classList.remove('open');
@@ -741,20 +925,19 @@ function doLogout(){
 }
 
 // APP
-function showApp(){
+function showApp(restorePage){
   document.getElementById('landing').classList.add('hide');
   setTimeout(()=>{
-    document.getElementById('app').style.display='flex';document.getElementById('app').classList.add('show');
-    buildNav();navigateTo('profile');
+    document.getElementById('app').style.display='flex';
+    document.getElementById('app').classList.add('show');
+    buildNav();
+    const lastPage = restorePage || localStorage.getItem('ffp_last_page') || 'profile';
+    navigateTo(lastPage);
     if(CU.role==='owner'||CU.role==='top'){document.getElementById('notif-toggle-btn').style.display='flex';updateNotifBadge();}
     else{updateAdminNotif();}
-    // Dev panel: show for owner, keep visible if already shown (dev mode)
     const devPanel=document.getElementById('dev-switcher');
-    if(devPanel){
-      if(CU.role==='owner') devPanel.style.display='flex';
-      // If panel is already visible (dev mode switch), keep it visible regardless of role
-    }
-  },700);
+    if(devPanel && CU.role==='owner') devPanel.style.display='flex';
+  },300);
 }
 function buildNav(){
   const nav=document.getElementById('nav-items');nav.innerHTML='';
@@ -809,6 +992,8 @@ function navigateTo(pageId){
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
   const ne=document.getElementById('nav-'+pageId);if(ne)ne.classList.add('active');
   const pe=document.getElementById('page-'+pageId);if(pe)pe.classList.add('active');
+  // Save current page so it survives reload
+  localStorage.setItem('ffp_last_page', pageId);
   if(pageId==='profile')renderProfile();
   else if(pageId==='planners')renderAllPlanners();
   else if(pageId==='my-planner')renderMyPlanner();
