@@ -566,7 +566,6 @@ async function _loadAll() {
     const unwrap = rows => (rows || []).map(r => r.data).filter(Boolean);
 
     _cache['users']           = unwrap(users.data);
-    console.log('[_loadAll] Loaded users:', _cache['users'].map(u=>u.username+'('+u.role+')'));
     _cache['notifications']   = unwrap(notifs.data).sort((a,b)=>(b.time||0)-(a.time||0));
     _cache['planner_reviews'] = unwrap(reviews.data);
     _cache['pending_regs']    = unwrap(regs.data);
@@ -1795,15 +1794,12 @@ function saveProfile(){
   // Update cache
   _cache['users'] = users;
   // Write directly to Supabase — single row upsert for reliability
-  console.log('[saveProfile] Input values — name:', n, '| email:', em, '| pass:', p?'(set)':'(empty)');
-  console.log('[saveProfile] Saving user to Supabase:', users[i].id, users[i].username, users[i].email);
   _sb.from('ffp_users').upsert({id: users[i].id, data: users[i]}, {onConflict:'id'})
     .then(({error, data}) => {
       if(error) {
         console.error('[saveProfile] FAILED:', error.message, error.details||'', error.hint||'');
         toast('Ошибка сохранения: ' + error.message, 'error');
       } else {
-        console.log('[saveProfile] SUCCESS — saved to Supabase');
       }
     });
   // Update session
@@ -4048,14 +4044,12 @@ function openPlannerPreviewCard(plannerKey,ownerName){
   const mc=document.getElementById('modal-content');if(mc)mc.style.width='480px';
 }
 
-// Owner: archive a planner from the preview card
 function ownerArchivePlanner(plannerKey, ownerName){
   confirmDialog('📦','Архивировать планнер',
     `Планнер для "${ownerName}" будет перемещён в архив. Текущий прогресс сохранится.`,
-    ()=>{
+    async ()=>{
       const pl=S.get('planners',{});
       if(!pl[plannerKey]){toast('Планнер не найден','error');return;}
-      // Archive it
       const arc=S.get('planner_archive',[]);
       const allU=S.get('users',[]);
       const allT=[...S.get('teams',[]),...S.get('top_teams',[])];
@@ -4070,12 +4064,21 @@ function ownerArchivePlanner(plannerKey, ownerName){
       };
       arc.unshift(archItem);
       S.set('planner_archive',arc);
+      // Remove from cache without upsertPlanners
       delete pl[plannerKey];
-      S.set('planners',pl);
-      _sb.from('ffp_planners').delete().eq('id',plannerKey);
-      _sb.from('task_completions').delete().eq('planner',plannerKey);
+      _cache['planners'] = pl;
+      // Delete the specific row from Supabase
+      const {error} = await _sb.from('ffp_planners').delete().eq('id', plannerKey);
+      if(error) { console.error('[ownerArchivePlanner]', error.message); }
+      _sb.from('task_completions').delete().eq('planner', plannerKey);
       toast('Планнер архивирован ✓','success');
-      _refreshActiveLive();
+      // Reset viewingId and force re-render
+      viewingId = null; activeWeekIdx = null;
+      const pid = document.querySelector('.page.active')?.id;
+      if(pid==='page-planners')          { try{ renderAllPlannersContent(); }catch(e){} }
+      else if(pid==='page-top-planners') { try{ renderTopPlannersContent(); }catch(e){} }
+      else if(pid==='page-admin-planners'){ try{ renderAdminPlannersContent(); }catch(e){} }
+      else { _refreshActiveLive(); }
     }
   );
 }
@@ -4084,14 +4087,24 @@ function ownerArchivePlanner(plannerKey, ownerName){
 function ownerDeletePlanner(plannerKey, ownerName){
   confirmDialog('🗑️','Удалить планнер',
     `Планнер для "${ownerName}" будет удалён безвозвратно. Весь прогресс будет потерян.`,
-    ()=>{
+    async ()=>{
       const pl=S.get('planners',{});
       delete pl[plannerKey];
-      S.set('planners',pl);
-      _sb.from('ffp_planners').delete().eq('id',plannerKey);
-      _sb.from('task_completions').delete().eq('planner',plannerKey);
+      // Update cache directly without triggering _upsertPlanners (which doesn't delete)
+      _cache['planners'] = pl;
+      // Delete the specific row from Supabase
+      const {error} = await _sb.from('ffp_planners').delete().eq('id', plannerKey);
+      if(error) { console.error('[ownerDeletePlanner]', error.message); toast('Ошибка удаления: '+error.message,'error'); return; }
+      _sb.from('task_completions').delete().eq('planner', plannerKey);
       toast('Планнер удалён','success');
-      _refreshActiveLive();
+      // Reset viewingId so list re-renders correctly
+      viewingId = null; activeWeekIdx = null;
+      // Force re-render of current planner list page
+      const pid = document.querySelector('.page.active')?.id;
+      if(pid==='page-planners')          { try{ renderAllPlannersContent(); }catch(e){} }
+      else if(pid==='page-top-planners') { try{ renderTopPlannersContent(); }catch(e){} }
+      else if(pid==='page-admin-planners'){ try{ renderAdminPlannersContent(); }catch(e){} }
+      else { _refreshActiveLive(); }
     }
   );
 }
@@ -4788,8 +4801,8 @@ function _doSavePlanner(mode){
       S.set('planner_archive',arc);
       delete pl[key];
       // Remove old planner row and its completions from DB
-      _sb.from('ffp_planners').delete().eq('planner_key',key);
-      _sb.from('task_completions').delete().eq('planner',key);
+      _sb.from('ffp_planners').delete().eq('id', key);
+      _sb.from('task_completions').delete().eq('planner', key);
     }
   };
   // Helper: save with archive + conflict check
