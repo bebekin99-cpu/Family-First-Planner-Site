@@ -566,6 +566,7 @@ async function _loadAll() {
     const unwrap = rows => (rows || []).map(r => r.data).filter(Boolean);
 
     _cache['users']           = unwrap(users.data);
+    console.log('[_loadAll] Loaded users:', _cache['users'].map(u=>u.username+'('+u.role+')'));
     _cache['notifications']   = unwrap(notifs.data).sort((a,b)=>(b.time||0)-(a.time||0));
     _cache['planner_reviews'] = unwrap(reviews.data);
     _cache['pending_regs']    = unwrap(regs.data);
@@ -1794,11 +1795,14 @@ function saveProfile(){
   // Update cache
   _cache['users'] = users;
   // Write directly to Supabase — single row upsert for reliability
+  console.log('[saveProfile] Saving user to Supabase:', users[i].id, users[i].username, users[i].email);
   _sb.from('ffp_users').upsert({id: users[i].id, data: users[i]}, {onConflict:'id'})
-    .then(({error}) => {
+    .then(({error, data}) => {
       if(error) {
-        console.error('Profile save failed:', error.message);
-        toast('Ошибка сохранения профиля: ' + error.message, 'error');
+        console.error('[saveProfile] FAILED:', error.message, error.details||'', error.hint||'');
+        toast('Ошибка сохранения: ' + error.message, 'error');
+      } else {
+        console.log('[saveProfile] SUCCESS — saved to Supabase');
       }
     });
   // Update session
